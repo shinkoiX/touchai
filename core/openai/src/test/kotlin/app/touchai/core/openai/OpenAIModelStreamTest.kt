@@ -49,6 +49,61 @@ class OpenAIModelStreamTest {
         }) }
     }.toString())
 
+    @Test fun interruptedBackgroundStreamRetrievesTheSameResponseWithoutAnotherPost() = runBlocking {
+        enqueue(sse("""{"type":"response.created","response":{"id":"resp_saved","background":true}}""") +
+            sse("""{"type":"response.output_text.delta","delta":"Partial"}"""))
+        server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("""{"id":"resp_saved","status":"completed","output":[{"type":"message","content":[{"type":"output_text","text":"Full answer"}]}]}"""))
+        val result = model.complete(config(ApiProtocol.Responses).copy(backgroundResponses = true), request)
+        assertEquals("Full answer", result.text)
+        val creation = server.takeRequest()!!
+        assertEquals("POST", creation.method)
+        assertTrue(Json.parseToJsonElement(creation.body.readUtf8()).jsonObject.getValue("background").jsonPrimitive.boolean)
+        val recovery = server.takeRequest()!!
+        assertEquals("GET", recovery.method)
+        assertEquals("/v1/responses/resp_saved", recovery.path)
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test fun restartingWithASavedIdOnlyRetrievesAndRetriesTransientGetFailures() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(503).setBody("unavailable"))
+        server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("""{"id":"resp_saved","status":"completed","output":[]}"""))
+        model.complete(config(ApiProtocol.Responses).copy(backgroundResponses = true), request.copy(resumeResponseId = "resp_saved"))
+        repeat(2) {
+            val sent = server.takeRequest()!!
+            assertEquals("GET", sent.method)
+            assertEquals("/v1/responses/resp_saved", sent.path)
+        }
+    }
+
+    @Test fun lostCreationWithoutAnIdIsNotResubmitted() = runBlocking {
+        enqueue(": keepalive\n\n")
+        val error = runCatching { model.complete(config(ApiProtocol.Responses).copy(backgroundResponses = true), request) }.exceptionOrNull()
+        assertTrue(error is ResponseInterruptedException)
+        assertTrue(error!!.message!!.contains("response ID"))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun manualCancellationCallsTheResponseCancelEndpoint() = runBlocking {
+        server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("""{"id":"resp_saved","status":"cancelled"}"""))
+        assertEquals("cancelled", model.cancelResponse(config(ApiProtocol.Responses), "resp_saved").getValue("status").jsonPrimitive.content)
+        val sent = server.takeRequest()!!
+        assertEquals("POST", sent.method)
+        assertEquals("/v1/responses/resp_saved/cancel", sent.path)
+    }
+
+    @Test fun downstreamFailuresDoNotTriggerRecoveryRequests() = runBlocking {
+        enqueue(sse("""{"type":"response.created","response":{"id":"resp_saved"}}""") +
+            sse("""{"type":"response.output_text.delta","delta":"Text"}"""))
+        val failure = java.io.IOException("Consumer failed")
+        val error = runCatching {
+            model.stream(config(ApiProtocol.Responses).copy(backgroundResponses = true), request).collect {
+                if (it is OpenAIStreamEvent.TextDelta) throw failure
+            }
+        }.exceptionOrNull()
+        assertSame(failure, error)
+        assertEquals(1, server.requestCount)
+    }
+
     @Test fun streamsFragmentedUnicodeAndSendsAuthenticatedPost() = runBlocking {
         val stream = ": heartbeat\r\n\r\n" + (chat("Hello 世界 👋") + chat("", "stop")).replace("\n", "\r\n")
         server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setChunkedBody(stream, 1))
@@ -82,7 +137,7 @@ class OpenAIModelStreamTest {
         val error = runCatching { model.stream(config(ApiProtocol.Responses), request).toList(events) }.exceptionOrNull()
         assertTrue(error is IncompleteResponseException)
         assertTrue(error!!.message!!.contains("output limit"))
-        assertEquals(listOf(OpenAIStreamEvent.TextDelta("Partial")), events)
+        assertEquals(listOf(OpenAIStreamEvent.TextDelta("Partial")), events.filterIsInstance<OpenAIStreamEvent.TextDelta>())
     }
 
     @Test fun lengthFinishKeepsTextFromTheSameFinalChunk() = runBlocking {
@@ -90,7 +145,53 @@ class OpenAIModelStreamTest {
         val events = mutableListOf<OpenAIStreamEvent>()
         val error = runCatching { model.stream(config(), request).toList(events) }.exceptionOrNull()
         assertTrue(error is IncompleteResponseException)
-        assertEquals(listOf(OpenAIStreamEvent.TextDelta("Last words")), events)
+        assertEquals(listOf(OpenAIStreamEvent.TextDelta("Last words")), events.filterIsInstance<OpenAIStreamEvent.TextDelta>())
+    }
+
+    @Test fun chatImageOnlyRepliesAreEmittedOnceAndPreserveFullPayloads() = runBlocking {
+        val imageChunk = """{"id":"chat-image-test","choices":[{"index":0,"delta":{"role":"assistant","images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,aW1hZ2U="},"index":0}]},"finish_reason":null}]}"""
+        enqueue(sse(imageChunk) + sse(imageChunk) + chat("", "stop"))
+        val events = model.stream(config(), request).toList()
+        val generated = events.filterIsInstance<OpenAIStreamEvent.ImageGenerated>().single().value
+        assertEquals("data:image/png;base64,aW1hZ2U=", generated.image.url)
+        assertTrue(events.filterIsInstance<OpenAIStreamEvent.TextDelta>().all { it.text.isEmpty() })
+        assertEquals(1, events.filterIsInstance<OpenAIStreamEvent.Completed>().size)
+        assertEquals(Json.parseToJsonElement(imageChunk), events.filterIsInstance<OpenAIStreamEvent.ResponsePayload>().first().value)
+    }
+
+    @Test fun chatImagesWithACaptionSurviveCompletion() = runBlocking {
+        enqueue(sse("""{"id":"chat-image-test","choices":[{"index":0,"delta":{"content":"Two pictures","images":[{"image_url":{"url":"data:image/png;base64,b25l"}},{"image_url":{"url":"data:image/webp;base64,dHdv"}}]},"finish_reason":"stop"}]}"""))
+        val result = model.complete(config(), request)
+        assertEquals("Two pictures", result.text)
+        assertEquals(listOf("data:image/png;base64,b25l", "data:image/webp;base64,dHdv"), result.images.map { it.image.url })
+        assertEquals(2, result.images.map { it.id }.toSet().size)
+    }
+
+    @Test fun imageOnlyResponsesAreEmittedOnceAndPreserveFullPayloads() = runBlocking {
+        val image = """{"id":"image-test","type":"image_generation_call","status":"completed","output_format":"png","result":"aW1hZ2U="}"""
+        enqueue(sse("""{"type":"response.image_generation_call.generating"}""") +
+            sse("""{"type":"response.output_item.done","item":$image}""") +
+            sse("""{"type":"response.image_generation_call.completed"}""") +
+            sse("""{"type":"response.completed","response":{"status":"completed","output":[$image,{"type":"message","content":[{"type":"output_text","text":""}]}]}}"""))
+        val events = model.stream(config(ApiProtocol.Responses), request).toList()
+        val generated = events.filterIsInstance<OpenAIStreamEvent.ImageGenerated>().single().value
+        assertEquals("image-test", generated.id)
+        assertEquals("data:image/png;base64,aW1hZ2U=", generated.image.url)
+        assertEquals(4, events.filterIsInstance<OpenAIStreamEvent.ResponsePayload>().size)
+        assertTrue(events.filterIsInstance<OpenAIStreamEvent.TextDelta>().isEmpty())
+        assertTrue(events.any { it is OpenAIStreamEvent.ImageGenerationStatus && it.status != null })
+        assertTrue(events.last() is OpenAIStreamEvent.Completed)
+    }
+
+    @Test fun completionOnlyImagesAndTextAreReadWithoutDuplicatingStreamedText() = runBlocking {
+        for (prefix in listOf("", sse("""{"type":"response.output_text.delta","delta":"Caption"}"""))) {
+            enqueue(prefix + sse("""{"type":"response.completed","response":{"output":[{"id":"one","type":"image_generation_call","output_format":"webp","result":"aW1hZ2U="},{"id":"two","type":"image_generation_call","output_format":"jpeg","result":"aW1hZ2U="},{"type":"message","content":[{"type":"output_text","text":"Caption"}]}]}}"""))
+            val result = model.complete(config(ApiProtocol.Responses), request)
+            assertEquals("Caption", result.text)
+            assertEquals(listOf("one", "two"), result.images.map { it.id })
+            assertTrue(result.images[0].image.url.startsWith("data:image/webp"))
+            assertTrue(result.images[1].image.url.startsWith("data:image/jpeg"))
+        }
     }
 
     @Test fun explicitErrorAndNestedFailureAreReported() = runBlocking {
@@ -110,13 +211,13 @@ class OpenAIModelStreamTest {
     @Test fun endOfFileAndDoneWithoutCompletionAreNotSuccess() = runBlocking {
         for (ending in listOf("", "data: [DONE]\n\n")) {
             enqueue(chat("Partial") + ending)
-            assertTrue(runCatching { model.complete(config(), request) }.exceptionOrNull() is IncompleteResponseException)
+            assertTrue(runCatching { model.complete(config(), request) }.exceptionOrNull() is ResponseInterruptedException)
         }
     }
 
     @Test fun unframedTerminalEventDoesNotCountAsCompleted() = runBlocking {
         enqueue(chat("Partial") + "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}")
-        assertTrue(runCatching { model.complete(config(), request) }.exceptionOrNull() is IncompleteResponseException)
+        assertTrue(runCatching { model.complete(config(), request) }.exceptionOrNull() is ResponseInterruptedException)
     }
 
     @Test fun httpErrorsContainStatusAndProviderMessageWithoutRetrying() = runBlocking {
@@ -176,7 +277,7 @@ class OpenAIModelStreamTest {
     @Test fun timeoutEndsAWaitingRequest() = runBlocking {
         server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
         val error = runCatching { model.complete(config().copy(timeoutMillis = 200), request) }.exceptionOrNull()
-        assertTrue(error is io.ktor.client.plugins.HttpRequestTimeoutException)
+        assertTrue(error is ResponseInterruptedException)
     }
 
     @Test fun sseParserJoinsDataLinesAndIgnoresComments() {

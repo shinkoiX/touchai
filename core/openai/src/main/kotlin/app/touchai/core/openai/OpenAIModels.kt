@@ -16,9 +16,11 @@ data class OpenAIModelConfig(
     val reasoningEffort: String? = null,
     val webSearch: Boolean = true,
     val timeoutMillis: Long = 120_000L,
+    val backgroundResponses: Boolean = false,
 )
 
 data class OpenAIImage(val url: String, val detail: String = "auto")
+data class GeneratedImage(val id: String, val image: OpenAIImage)
 enum class MessageRole(val value: String) { User("user"), Assistant("assistant") }
 
 data class ChatMessage(
@@ -27,13 +29,14 @@ data class ChatMessage(
     val images: List<OpenAIImage> = emptyList(),
 )
 
-enum class RequestPurpose { Chat, Retry, ConnectionTest }
+enum class RequestPurpose { Chat, Retry, Resume, ConnectionTest }
 
 data class OpenAIRequest(
     val messages: List<ChatMessage>,
     val instructions: String = "",
     val purpose: RequestPurpose = RequestPurpose.Chat,
     val presetName: String? = null,
+    val resumeResponseId: String? = null,
 )
 
 sealed interface OpenAIStreamEvent {
@@ -41,6 +44,12 @@ sealed interface OpenAIStreamEvent {
     data class Completed(val response: JsonObject) : OpenAIStreamEvent
     data class SearchStatus(val status: String) : OpenAIStreamEvent
     data class Citation(val source: WebCitation) : OpenAIStreamEvent
+    data class ImageGenerated(val value: GeneratedImage) : OpenAIStreamEvent
+    data class ImageGenerationStatus(val status: String?) : OpenAIStreamEvent
+    data class ResponsePayload(val value: JsonElement) : OpenAIStreamEvent
+    data class ResponseCheckpoint(val id: String) : OpenAIStreamEvent
+    data class RecoveryStatus(val status: String?) : OpenAIStreamEvent
+    data class TextSnapshot(val text: String) : OpenAIStreamEvent
 }
 
 data class WebCitation(
@@ -54,10 +63,15 @@ interface ChatClient {
     fun stream(config: OpenAIModelConfig, request: OpenAIRequest): Flow<OpenAIStreamEvent>
 }
 
-data class OpenAICompletion(val text: String, val response: JsonObject)
+data class OpenAICompletion(val text: String, val response: JsonObject, val images: List<GeneratedImage> = emptyList())
 class OpenAIRequestException(message: String, val httpStatus: Int? = null) : Exception(message)
 class OpenAIStreamException(message: String) : Exception(message)
 class IncompleteResponseException(val reason: String) : Exception("Answer incomplete: $reason")
+class ResponseInterruptedException(message: String, cause: Throwable? = null) : Exception(message, cause)
+class ResponseCancelledException(val response: JsonObject) : Exception("The provider cancelled this response.")
+class UserRequestedCancellation(val response: JsonObject? = null) : kotlinx.coroutines.CancellationException("Stopped by user")
+
+data class ResponseOutput(val text: String, val images: List<GeneratedImage>, val citations: List<WebCitation>)
 
 fun buildRequestUrl(config: OpenAIModelConfig): String =
     "${config.baseUrl.trimEnd('/')}/${config.protocol.path}"
@@ -97,7 +111,8 @@ fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest): JsonObj
             if (config.webSearch) putJsonObject("web_search_options") { }
         }
         ApiProtocol.Responses -> {
-            put("store", false)
+            put("store", config.backgroundResponses)
+            if (config.backgroundResponses) put("background", true)
             if (request.instructions.isNotBlank()) put("instructions", request.instructions)
             putJsonArray("input") {
                 request.messages.forEach { message -> add(buildJsonObject {

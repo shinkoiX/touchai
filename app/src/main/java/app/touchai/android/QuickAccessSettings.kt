@@ -46,7 +46,20 @@ fun QuickAccessSettings(options: QuickAccessSettings, onChange: (QuickAccessSett
         }
         HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
         SwitchRow("Floating button", options.floatingButton, { onChange(options.copy(floatingButton = it)) })
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Button size", style = MaterialTheme.typography.bodyMedium)
+                Text("${options.buttonSizeDp} dp", style = MaterialTheme.typography.bodyMedium)
+            }
+            Slider(
+                value = options.buttonSizeDp.toFloat(),
+                onValueChange = { onChange(options.copy(buttonSizeDp = (it / 4).roundToInt() * 4)) },
+                valueRange = 32f..96f, steps = 15, enabled = options.floatingButton,
+            )
+        }
         SwitchRow("Notification", options.notification, { onChange(options.copy(notification = it)) })
+        SwitchRow("Attach screenshots automatically", options.attachScreenshotAutomatically,
+            { onChange(options.copy(attachScreenshotAutomatically = it)) })
         Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("Notification capture delay", style = MaterialTheme.typography.bodyMedium)

@@ -10,10 +10,10 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
-data class ChatHistoryEntry(val id: String, val title: String, val updatedAt: Long, val turnCount: Int)
+data class ChatHistoryEntry(val id: String, val title: String, val updatedAt: Long, val turnCount: Int, val pending: Boolean = false)
 data class SavedChat(val id: String, val updatedAt: Long, val selectedPreset: String?, val turns: List<ChatTurn>) {
     val entry: ChatHistoryEntry get() = ChatHistoryEntry(id,
-        turns.first().user.text.replace(Regex("\\s+"), " ").trim().take(80).ifEmpty { "Image chat" }, updatedAt, turns.size)
+        turns.first().user.text.replace(Regex("\\s+"), " ").trim().take(80).ifEmpty { "Image chat" }, updatedAt, turns.size, turns.last().isRunning)
 }
 
 interface ChatHistoryRepository {
@@ -30,6 +30,7 @@ class ChatHistoryStore(private val directory: File, private val cipher: ApiKeyCi
         val entry = chat.entry
         val header = buildJsonObject {
             put("id", entry.id); put("title", entry.title); put("updatedAt", entry.updatedAt); put("turnCount", entry.turnCount)
+            put("pending", entry.pending)
         }
         val body = buildJsonObject {
             put("selectedPreset", chat.selectedPreset)
@@ -49,7 +50,7 @@ class ChatHistoryStore(private val directory: File, private val cipher: ApiKeyCi
                 path.toFile().bufferedReader().use { reader ->
                     val header = Json.parseToJsonElement(reader.readLine()).jsonObject
                     ChatHistoryEntry(header.string("id"), header.string("title"), header.getValue("updatedAt").jsonPrimitive.long,
-                        header.getValue("turnCount").jsonPrimitive.int)
+                        header.getValue("turnCount").jsonPrimitive.int, header["pending"]?.jsonPrimitive?.boolean ?: false)
                 }
             }.toArray().map { it as ChatHistoryEntry }.sortedByDescending { it.updatedAt }
         }

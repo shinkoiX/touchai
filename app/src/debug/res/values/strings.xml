@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">TouchAI Debug</string>
+    <string name="accessibility_service_label">TouchAI Debug screen capture</string>
+</resources>

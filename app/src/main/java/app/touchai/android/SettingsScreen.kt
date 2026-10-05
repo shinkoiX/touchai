@@ -70,6 +70,12 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                                     Text(if (preset.customAi == null) "Default AI" else preset.customAi.api.model.ifBlank { "Custom AI" },
                                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
+                                AppIconButton(R.drawable.ic_arrow_up, "Move ${preset.name} up", {
+                                    onDraftChange(draft.copy(presets = draft.presets.toMutableList().apply { add(index - 1, removeAt(index)) }))
+                                }, enabled = index > 0)
+                                AppIconButton(R.drawable.ic_arrow_down, "Move ${preset.name} down", {
+                                    onDraftChange(draft.copy(presets = draft.presets.toMutableList().apply { add(index + 1, removeAt(index)) }))
+                                }, enabled = index < draft.presets.lastIndex)
                                 AppIcon(R.drawable.ic_expand, if (expanded) "Collapse" else "Expand", Modifier.rotate(rotation), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             if (expanded) {
@@ -85,9 +91,6 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                                     TestButton(state.testingConnection) { onTest(configuration, preset.name) }
                                 }
                                 Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.End) {
-                                    AppIconButton(R.drawable.ic_arrow_up, "Move up", {
-                                        onDraftChange(draft.copy(presets = draft.presets.toMutableList().apply { add(index - 1, removeAt(index)) }))
-                                    }, enabled = index > 0)
                                     AppIconButton(R.drawable.ic_delete, "Remove", {
                                         onDraftChange(draft.copy(presets = draft.presets.filterNot { it.id == preset.id },
                                             lastPresetId = draft.lastPresetId?.takeUnless { it == preset.id }))
@@ -160,4 +163,6 @@ private fun AiConfigurationEditor(value: AiConfiguration, onChange: (AiConfigura
         OutlinedTextField(value.instructions, { onChange(value.copy(instructions = it)) }, label = { Text("Instructions") }, minLines = 2, modifier = Modifier.fillMaxWidth())
     }
     SwitchRow("Web search", value.api.webSearch, { search -> api { it.copy(webSearch = search) } })
+    if (value.api.protocol == ApiProtocol.Responses) SwitchRow("Recover interrupted responses", value.api.backgroundResponses,
+        { enabled -> api { it.copy(backgroundResponses = enabled) } })
 }

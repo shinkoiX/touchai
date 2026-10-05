@@ -3,6 +3,7 @@ package app.touchai.android
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.graphics.Bitmap
+import android.widget.Toast
 import java.io.IOException
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -36,6 +37,8 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -47,6 +50,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.touchai.core.markdown.StreamingMarkdown
 import app.touchai.core.openai.OpenAIImage
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 @Composable
@@ -59,6 +63,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
     val compactKeyboard = compact && WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val scope = rememberCoroutineScope()
     var loadingImage by remember { mutableStateOf(false) }
+    var attachmentMenuOpen by remember { mutableStateOf(false) }
     val exportHistory = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) viewModel.exportHistory {
             context.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("The export file cannot be opened.")
@@ -126,8 +131,8 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                     if (api.webSearch) AppIcon(R.drawable.ic_search, "Web search on", Modifier.padding(start = 4.dp), 14.dp, MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            AppIconButton(R.drawable.ic_add, "New chat", viewModel::newChat, enabled = !state.isStreaming && !loadingImage)
-            AppIconButton(R.drawable.ic_history, "Chat history", { keyboard?.hide(); viewModel.showHistory(true) }, enabled = !state.isStreaming && state.ready)
+            AppIconButton(R.drawable.ic_add, "New chat", viewModel::newChat, enabled = !state.preparingImage && !loadingImage)
+            AppIconButton(R.drawable.ic_history, "Chat history", { keyboard?.hide(); viewModel.showHistory(true) }, enabled = state.ready)
             AppIconButton(R.drawable.ic_settings, "Settings", openSettings, enabled = !state.isStreaming && state.ready)
             onClose?.let { AppIconButton(R.drawable.ic_close, "Close", it) }
         }
@@ -148,7 +153,9 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                         AssistantMessage(turn, canRetry = index == state.turns.lastIndex && !state.isStreaming, onRetry = viewModel::retry)
                     }
                     state.imagePreview?.let { bitmap ->
-                        Attachment(bitmap, maxHeight = if (compact) 160.dp else if (state.turns.isEmpty()) 440.dp else 280.dp, state.preparingImage, onCrop = { keyboard?.hide(); viewModel.openCrop() }, onRemove = viewModel::removeImage)
+                        Attachment(bitmap, maxHeight = if (compact) 160.dp else if (state.turns.isEmpty()) 440.dp else 280.dp,
+                            preparing = state.preparingImage, attached = state.imageAttached,
+                            onCrop = { keyboard?.hide(); viewModel.openCrop() }, onToggle = viewModel::toggleImageAttachment)
                     }
                 }
             }
@@ -164,9 +171,21 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
             Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = MaterialTheme.shapes.extraLarge) {
                 Row(Modifier.padding(4.dp), verticalAlignment = Alignment.Bottom) {
                     Box(Modifier.padding(bottom = 4.dp)) {
-                        IconButton(onClick = { picker.launch("image/*") }, enabled = state.ready && !state.isStreaming && !loadingImage) {
+                        IconButton(onClick = {
+                            if (state.capturedScreenshot != null) attachmentMenuOpen = true else picker.launch("image/*")
+                        }, enabled = state.ready && !state.isStreaming && !loadingImage) {
                             if (loadingImage) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                             else AppIcon(R.drawable.ic_image, if (state.originalImage != null) "Replace image" else "Attach image")
+                        }
+                        DropdownMenu(expanded = attachmentMenuOpen, onDismissRequest = { attachmentMenuOpen = false }) {
+                            DropdownMenuItem(text = { Text("Attach screenshot") }, onClick = {
+                                attachmentMenuOpen = false
+                                viewModel.attachScreenshot()
+                            })
+                            DropdownMenuItem(text = { Text("Choose image") }, onClick = {
+                                attachmentMenuOpen = false
+                                picker.launch("image/*")
+                            })
                         }
                     }
                     TextField(state.prompt, viewModel::setPrompt, placeholder = { Text("Message") }, modifier = Modifier.weight(1f),
@@ -178,9 +197,11 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(onSend = { if (!loadingImage) send() }))
                     Box(Modifier.padding(bottom = 4.dp)) {
-                        if (state.isStreaming) FilledTonalIconButton(onClick = viewModel::cancel) { AppIcon(R.drawable.ic_stop, "Stop") }
+                        if (state.isStreaming) FilledTonalIconButton(onClick = viewModel::cancel,
+                            enabled = state.turns.last().status != TurnStatus.Cancelling) { AppIcon(R.drawable.ic_stop, "Stop") }
                         else FilledIconButton(onClick = send,
-                            enabled = state.ready && !loadingImage && !state.preparingImage && (state.originalImage == null || state.image != null)) {
+                            enabled = state.ready && !loadingImage && (!state.imageAttached ||
+                                (!state.preparingImage && (state.originalImage == null || state.image != null)))) {
                             AppIcon(R.drawable.ic_send, "Send", size = 20.dp)
                         }
                     }
@@ -232,22 +253,62 @@ private fun UserMessage(turn: ChatTurn) {
 }
 
 @Composable
-private fun SentImage(image: OpenAIImage) {
-    val preview by produceState<Bitmap?>(null, image) { value = ImageProcessor.decode(image, 1024) }
+private fun SentImage(image: OpenAIImage, description: String = "Attached image") {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var saving by remember(image) { mutableStateOf(false) }
+    val save = {
+        saving = true
+        scope.launch(Dispatchers.Main.immediate) {
+            try {
+                ImageGallery.save(context, image)
+                Toast.makeText(context, "Saved to Pictures/TouchAI", Toast.LENGTH_SHORT).show()
+            } catch (error: CancellationException) { throw error }
+            catch (_: Exception) { Toast.makeText(context, "Could not save picture.", Toast.LENGTH_LONG).show() }
+            finally { saving = false }
+        }
+        Unit
+    }
+    var imageError by remember(image) { mutableStateOf<String?>(null) }
+    val preview by produceState<Bitmap?>(null, image) {
+        try { value = ImageProcessor.decode(image, 1024) }
+        catch (error: CancellationException) { throw error }
+        catch (_: Exception) { imageError = "Could not decode the image." }
+    }
     var expanded by remember(image) { mutableStateOf(false) }
     preview?.let { bitmap ->
-        Image(remember(bitmap) { bitmap.asImageBitmap() }, "Attached image",
-            Modifier.heightIn(max = 240.dp).widthIn(max = 280.dp).clip(MaterialTheme.shapes.medium)
-                .clickable { expanded = true }, contentScale = ContentScale.Fit)
+        Box {
+            Image(remember(bitmap) { bitmap.asImageBitmap() }, description,
+                Modifier.sizeIn(minWidth = 128.dp, minHeight = 96.dp, maxWidth = 280.dp, maxHeight = 240.dp).clip(MaterialTheme.shapes.medium)
+                    .clickable { expanded = true }, contentScale = ContentScale.Fit)
+            Surface(shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp)) {
+                IconButton(onClick = save, enabled = !saving) {
+                    if (saving) CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                    else AppIcon(R.drawable.ic_download, "Save picture", size = 20.dp)
+                }
+            }
+        }
     }
+    imageError?.let { MessageBanner(it, error = true) }
     if (expanded) Dialog(onDismissRequest = { expanded = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
-        val fullImage by produceState(preview, image) { value = ImageProcessor.decode(image, 4096) }
+        val fullImage by produceState(preview, image) {
+            try { value = ImageProcessor.decode(image, 4096) }
+            catch (error: CancellationException) { throw error }
+            catch (_: Exception) { imageError = "Could not decode the image."; expanded = false }
+        }
         Surface(Modifier.fillMaxSize(), color = Color.Black) {
             Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-                fullImage?.let { bitmap -> Image(remember(bitmap) { bitmap.asImageBitmap() }, "Attached image preview",
+                fullImage?.let { bitmap -> Image(remember(bitmap) { bitmap.asImageBitmap() }, "$description preview",
                     Modifier.fillMaxSize().padding(16.dp), contentScale = ContentScale.Fit) }
-                IconButton(onClick = { expanded = false }, modifier = Modifier.align(Alignment.TopEnd)) {
-                    AppIcon(R.drawable.ic_close, "Close image", tint = Color.White)
+                Row(Modifier.align(Alignment.TopEnd)) {
+                    IconButton(onClick = save, enabled = !saving) {
+                        if (saving) CircularProgressIndicator(Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                        else AppIcon(R.drawable.ic_download, "Save picture", tint = Color.White)
+                    }
+                    IconButton(onClick = { expanded = false }) {
+                        AppIcon(R.drawable.ic_close, "Close image", tint = Color.White)
+                    }
                 }
             }
         }
@@ -271,9 +332,12 @@ private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> U
                 Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
             }
         }
-        if (turn.answer.isEmpty() && turn.status == TurnStatus.Streaming) CircularProgressIndicator(Modifier.padding(vertical = 4.dp).size(18.dp), strokeWidth = 2.dp)
+        turn.imageGenerationStatus?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
+        turn.recoveryStatus?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
+        if (turn.answer.isEmpty() && turn.generatedImages.isEmpty() && turn.isRunning) CircularProgressIndicator(Modifier.padding(vertical = 4.dp).size(18.dp), strokeWidth = 2.dp)
         val markdown = remember(turn.answer, turn.citations) { citationMarkdown(turn.answer, turn.citations) }
         SelectionContainer { StreamingMarkdown(markdown, turn.status == TurnStatus.Streaming, Modifier.fillMaxWidth()) }
+        turn.generatedImages.forEach { output -> key(output.id) { SentImage(output.image, "Generated image") } }
         val sources = turn.citations.distinctBy { it.url }
         if (sources.isNotEmpty()) Column {
             sources.forEachIndexed { sourceIndex, citation ->
@@ -299,19 +363,25 @@ private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> U
 }
 
 @Composable
-private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, onCrop: () -> Unit, onRemove: () -> Unit) {
+private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, attached: Boolean, onCrop: () -> Unit, onToggle: () -> Unit) {
     val shape = MaterialTheme.shapes.large
     Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Box {
-            Image(remember(bitmap) { bitmap.asImageBitmap() }, "Image to send",
+            Image(remember(bitmap) { bitmap.asImageBitmap() }, "Image preview",
                 Modifier.heightIn(min = 96.dp, max = maxHeight).widthIn(min = 96.dp)
                     .clip(shape).background(MaterialTheme.colorScheme.surfaceContainer)
-                    .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), shape)
+                    .border(BorderStroke(if (attached) 2.dp else 1.dp, if (attached) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant), shape)
                     .clickable(onClick = onCrop).semantics { contentDescription = "Crop image" },
                 contentScale = ContentScale.Fit)
-            Surface(onClick = onRemove, shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White,
-                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(28.dp).semantics { contentDescription = "Remove image" }) {
-                Box(contentAlignment = Alignment.Center) { AppIcon(R.drawable.ic_close, null, size = 16.dp) }
+            Surface(onClick = onToggle, shape = CircleShape,
+                color = if (attached) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest,
+                contentColor = if (attached) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(36.dp).semantics {
+                    contentDescription = if (attached) "Remove image" else "Add image"
+                    selected = attached
+                    stateDescription = if (attached) "Attached" else "Not attached"
+                }) {
+                Box(contentAlignment = Alignment.Center) { AppIcon(if (attached) R.drawable.ic_close else R.drawable.ic_add, null, size = 20.dp) }
             }
             Surface(shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White,
                 modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).size(28.dp)) {

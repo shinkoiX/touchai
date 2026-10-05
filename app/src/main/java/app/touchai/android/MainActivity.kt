@@ -39,6 +39,8 @@ class MainActivity : ComponentActivity() {
         showChat(intent)
     }
 
+    override fun onStart() { super.onStart(); app.restorePendingRequests() }
+
     private fun showChat(intent: Intent) {
         val incoming = (if (intent.action == OpenChat) app.chatSessionTransfer.take() else null)
             ?: app.collapsedChatSession.take()
@@ -49,10 +51,13 @@ class MainActivity : ComponentActivity() {
         val model = ViewModelProvider(session, app.chatViewModelFactory())[OpenAIChatViewModel::class.java]
         viewModel = model
         if (intent.action == OpenSettings) { model.loadSettings(); model.showSettings(true) }
+        if (intent.action == OpenRequest) intent.getStringExtra(RequestChatId)?.let(model::openChat)
     }
 
     companion object {
         const val OpenSettings = "app.touchai.android.OPEN_SETTINGS"
         const val OpenChat = "app.touchai.android.OPEN_CHAT"
+        const val OpenRequest = "app.touchai.android.OPEN_REQUEST"
+        const val RequestChatId = "request_chat_id"
     }
 }

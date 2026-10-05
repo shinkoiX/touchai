@@ -53,7 +53,15 @@ class ScreenCaptureService : AccessibilityService() {
 
     fun updateButtonPosition(value: QuickAccessSettings) {
         options = value
+        sizeButton()
         positionButton()
+    }
+
+    private fun sizeButton() {
+        params.width = dp(options.buttonSizeDp)
+        params.height = params.width
+        val padding = (params.width * 14f / 52f).roundToInt()
+        bubble?.setPadding(padding, padding, padding, padding)
     }
 
     fun setBubbleVisible(visible: Boolean) {
@@ -116,7 +124,6 @@ class ScreenCaptureService : AccessibilityService() {
             setImageResource(R.drawable.ic_spark)
             imageTintList = ColorStateList.valueOf(Color.WHITE)
             scaleType = ImageView.ScaleType.FIT_CENTER
-            setPadding(dp(14), dp(14), dp(14), dp(14))
             contentDescription = getString(R.string.floating_button_description)
             background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Color.rgb(123, 108, 255), Color.rgb(52, 36, 196))).apply {
                 shape = GradientDrawable.OVAL
@@ -167,6 +174,7 @@ class ScreenCaptureService : AccessibilityService() {
             }
         }
         bubble = view
+        sizeButton()
         positionButton(updateWindow = false)
         windowManager.addView(view, params)
     }
@@ -183,8 +191,8 @@ class ScreenCaptureService : AccessibilityService() {
         val metrics = windowManager.maximumWindowMetrics
         val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
         return android.graphics.Rect(insets.left + dp(8), insets.top + dp(8),
-            (metrics.bounds.width() - insets.right - dp(60)).coerceAtLeast(insets.left + dp(8)),
-            (metrics.bounds.height() - insets.bottom - dp(60)).coerceAtLeast(insets.top + dp(8)))
+            (metrics.bounds.width() - insets.right - dp(options.buttonSizeDp + 8)).coerceAtLeast(insets.left + dp(8)),
+            (metrics.bounds.height() - insets.bottom - dp(options.buttonSizeDp + 8)).coerceAtLeast(insets.top + dp(8)))
     }
 
     suspend fun captureScreen(waitForNotificationShade: Boolean): Bitmap {

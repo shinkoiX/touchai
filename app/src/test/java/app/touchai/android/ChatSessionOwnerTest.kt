@@ -1,10 +1,13 @@
 package app.touchai.android
 
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelStore
 import app.touchai.core.openai.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.test.*
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -21,86 +24,66 @@ class ChatSessionOwnerTest {
         override suspend fun save(settings: AppSettings) = Unit
         override suspend fun rememberPreset(id: String?) = Unit
     }
-    private val client = object : ChatClient {
-        override fun stream(config: OpenAIModelConfig, request: OpenAIRequest) = flow {
-            emit(OpenAIStreamEvent.TextDelta("Still streaming"))
-            awaitCancellation()
-        }
+    private class TrackedModel : ViewModel() {
+        var cleared = false
+        override fun onCleared() { cleared = true }
     }
 
-    @Test fun discardingACollapsedChatReleasesItAndRestoringTransfersOwnershipOnce() = runTest {
-        val collapsed = ChatSessionTransfer()
-        val first = ViewModelStore()
-        var firstClosed = 0
-        first.put("chat", OpenAIChatViewModel(MemoryChatHistoryRepository(), repository, client, closeClient = { firstClosed++ }))
-        collapsed.offer(first)
-        collapsed.clear()
-        assertEquals(1, firstClosed)
-        assertNull(collapsed.take())
-        val next = ViewModelStore()
-        var nextClosed = 0
-        next.put("chat", OpenAIChatViewModel(MemoryChatHistoryRepository(), repository, client, closeClient = { nextClosed++ }))
-        collapsed.offer(next)
-        val restored = collapsed.take()!!
-        collapsed.clear()
-        assertEquals(0, nextClosed)
-        assertSame(next, restored)
-        assertNull(collapsed.take())
-        restored.clear()
-        assertEquals(1, nextClosed)
-        advanceUntilIdle()
-    }
-
-    @Test fun handoffKeepsDraftAndAttachmentWhenCaptureActivityIsDestroyed() = runTest {
+    @Test fun handoffTransfersOwnershipAndReleasesThePreviousStore() {
         val capture = ChatSessionOwner()
         val captureActivity = ViewModelStore().apply { put("session", capture) }
-        var closed = 0
-        val chat = OpenAIChatViewModel(MemoryChatHistoryRepository(), repository, client, closeClient = { closed++ })
+        val chat = TrackedModel()
         capture.viewModelStore.put("chat", chat)
-        runCurrent()
-        chat.setPrompt("Unsent draft")
-        chat.setImage(OpenAIImage("data:image/png;base64,test"))
-        val before = chat.uiState.value
         val transfer = ChatSessionTransfer()
         transfer.offer(capture.detach())
         captureActivity.clear()
-        assertEquals(0, closed)
+        assertFalse(chat.cleared)
         val main = ChatSessionOwner()
         val mainActivity = ViewModelStore().apply { put("session", main) }
+        val previous = TrackedModel()
+        main.viewModelStore.put("chat", previous)
         main.adopt(transfer.take()!!)
+        assertTrue(previous.cleared)
         assertSame(chat, main.viewModelStore["chat"])
-        assertEquals(before, chat.uiState.value)
         assertNull(transfer.take())
         mainActivity.clear()
-        assertEquals(1, closed)
+        assertTrue(chat.cleared)
     }
 
-    @Test fun handoffPreservesAnActiveResponseAndReleasesThePreviousMainChat() = runTest {
-        val capture = ChatSessionOwner()
-        val captureActivity = ViewModelStore().apply { put("session", capture) }
-        var capturedClosed = 0
-        val chat = OpenAIChatViewModel(MemoryChatHistoryRepository(), repository, client, closeClient = { capturedClosed++ })
-        capture.viewModelStore.put("chat", chat)
-        runCurrent()
-        chat.setPrompt("Keep answering"); chat.submit()
+    @Test fun closingTheUiDoesNotStopTheRequestButTheStopButtonDoes() = runTest {
+        val history = MemoryChatHistoryRepository()
+        var connectionClosed = false
+        val client = object : ChatClient {
+            override fun stream(config: OpenAIModelConfig, request: OpenAIRequest) = flow {
+                try { emit(OpenAIStreamEvent.TextDelta("Still streaming")); awaitCancellation() }
+                finally { connectionClosed = true }
+            }
+        }
+        val requests = ChatRequestRunner(history, client, { _, _ -> buildJsonObject { put("status", "cancelled") } },
+            CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate), {}, {})
+        val model = OpenAIChatViewModel(history, repository, client, requests)
+        val activity = ViewModelStore().apply { put("chat", model) }
+        runCurrent(); model.setPrompt("Keep answering"); model.submit()
         advanceTimeBy(100); runCurrent()
-        assertTrue(chat.uiState.value.isStreaming)
-        val main = ChatSessionOwner()
-        val mainActivity = ViewModelStore().apply { put("session", main) }
-        var previousClosed = 0
-        main.viewModelStore.put("chat", OpenAIChatViewModel(MemoryChatHistoryRepository(), repository, client,
-            closeClient = { previousClosed++ }))
-        val transfer = ChatSessionTransfer()
-        transfer.offer(capture.detach())
-        captureActivity.clear()
-        main.adopt(transfer.take()!!)
-        runCurrent()
-        assertEquals(1, previousClosed)
-        assertEquals(0, capturedClosed)
-        assertTrue(chat.uiState.value.isStreaming)
-        assertEquals("Still streaming", chat.uiState.value.turns.single().answer)
-        mainActivity.clear(); advanceUntilIdle()
-        assertEquals(1, capturedClosed)
-        assertEquals(TurnStatus.Stopped, chat.uiState.value.turns.single().status)
+        val id = model.uiState.value.chatId
+        activity.clear(); runCurrent()
+        assertFalse(connectionClosed)
+        assertNotNull(requests.find(id))
+        assertEquals("Still streaming", requests.find(id)!!.state.value.turns.last().answer)
+        requests.stop(id); advanceUntilIdle()
+        assertTrue(connectionClosed)
+        assertEquals(TurnStatus.Stopped, history.chats.getValue(id).turns.last().status)
+        assertTrue(requests.active.value.isEmpty())
+    }
+
+    @Test fun clearingACollapsedStoreDoesNotKeepItsUiAlive() {
+        val collapsed = ChatSessionTransfer()
+        val store = ViewModelStore()
+        val model = TrackedModel()
+        store.put("chat", model)
+        collapsed.offer(store)
+        collapsed.clear()
+        assertTrue(model.cleared)
+        assertNull(collapsed.take())
     }
 }

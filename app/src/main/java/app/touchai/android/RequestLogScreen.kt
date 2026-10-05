@@ -4,6 +4,8 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.database.sqlite.SQLiteException
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
@@ -21,7 +23,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.touchai.core.openai.RequestLogRecord
 import java.text.DateFormat
 import java.util.Date
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -38,10 +44,36 @@ fun RequestLogScreen(store: RequestLogStore, onClose: () -> Unit) {
     var expanded by rememberSaveable { mutableStateOf<String?>(null) }
     var confirmClear by remember { mutableStateOf(false) }
     var refresh by remember { mutableIntStateOf(0) }
+    var detailText by remember { mutableStateOf<String?>(null) }
+    var exportId by rememberSaveable { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val json = remember { Json { prettyPrint = true } }
     val dateFormat = remember { DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM) }
+    val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        val id = exportId
+        if (uri != null && id != null) scope.launch {
+            try {
+                val record = store.readDetail(id)
+                withContext(Dispatchers.IO) {
+                    val output = context.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("The export file cannot be opened.")
+                    output.bufferedWriter().use { it.write(json.encodeToString(JsonObject.serializer(), record.json())) }
+                }
+                readError = null
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { readError = "Could not export request log: ${error.message}" }
+        }
+    }
+    LaunchedEffect(expanded, revision) {
+        detailText = null
+        expanded?.let { id ->
+            try {
+                val detail = store.readDetail(id)
+                detailText = withContext(Dispatchers.Default) { requestLogPreviewText(detail.json()) }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { readError = "Could not read request output: ${error.message}" }
+        }
+    }
     LaunchedEffect(revision, limit, refresh) {
         loading = true
         try { entries = store.read(limit + 1); readError = null }
@@ -72,7 +104,12 @@ fun RequestLogScreen(store: RequestLogStore, onClose: () -> Unit) {
                         Text("${entry.data.getValue("messageCount")} messages · ${entry.data.getValue("imageCount")} images$duration",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (expanded == entry.id) {
-                            val text = remember(entry) { json.encodeToString(JsonObject.serializer(), entry.json()) }
+                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                                TextButton(onClick = { exportId = entry.id; export.launch("touchai-request-${entry.id}.json") }) { Text("Export log") }
+                            }
+                            val text = detailText
+                            if (text == null) LinearProgressIndicator(Modifier.fillMaxWidth())
+                            else {
                             Surface(color = MaterialTheme.colorScheme.surfaceContainerHighest, shape = MaterialTheme.shapes.medium) {
                                 Box {
                                     SelectionContainer {
@@ -80,11 +117,12 @@ fun RequestLogScreen(store: RequestLogStore, onClose: () -> Unit) {
                                             modifier = Modifier.fillMaxWidth().padding(start = 12.dp, top = 12.dp, bottom = 12.dp, end = 48.dp))
                                     }
                                     Box(Modifier.align(Alignment.TopEnd)) {
-                                        AppIconButton(R.drawable.ic_copy, "Copy log", {
+                                        AppIconButton(R.drawable.ic_copy, "Copy log summary", {
                                             context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Request log", text))
                                         })
                                     }
                                 }
+                            }
                             }
                         }
                     }
@@ -99,8 +137,9 @@ fun RequestLogScreen(store: RequestLogStore, onClose: () -> Unit) {
         confirmButton = { TextButton(onClick = {
             confirmClear = false
             scope.launch {
-                try { store.clear(); readError = null }
-                catch (_: SQLiteException) { readError = "Could not clear request logs." }
+                try { store.clear(); expanded = null; readError = null }
+                catch (error: CancellationException) { throw error }
+                catch (_: Exception) { readError = "Could not clear request logs." }
             }
         }) { Text("Clear") } },
         dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } })

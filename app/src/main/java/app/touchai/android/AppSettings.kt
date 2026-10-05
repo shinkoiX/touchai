@@ -21,6 +21,8 @@ data class QuickAccessSettings(
     val buttonOnRight: Boolean = true,
     val buttonY: Float = 0.35f,
     val notificationCaptureDelayMillis: Int = 200,
+    val buttonSizeDp: Int = 52,
+    val attachScreenshotAutomatically: Boolean = true,
 )
 
 data class AppSettings(

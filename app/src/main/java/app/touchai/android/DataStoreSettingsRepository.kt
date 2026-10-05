@@ -32,6 +32,7 @@ class DataStoreSettingsRepository(
                 protocol = prefs[Protocol]?.let(ApiProtocol::valueOf) ?: defaults.api.protocol,
                 reasoningEffort = prefs[Effort]?.takeIf(String::isNotEmpty),
                 webSearch = prefs[WebSearch] ?: true,
+                backgroundResponses = prefs[BackgroundResponses] ?: false,
             ),
             instructions = prefs[Instructions] ?: "",
             presets = prefs[Presets]?.let { serialized ->
@@ -66,6 +67,7 @@ class DataStoreSettingsRepository(
             prefs[Protocol] = settings.api.protocol.name
             prefs[Effort] = settings.api.reasoningEffort ?: ""
             prefs[WebSearch] = settings.api.webSearch
+            prefs[BackgroundResponses] = settings.api.backgroundResponses
             prefs[Instructions] = settings.instructions
             prefs[Presets] = presets
             val selected = prefs[LastPreset] ?: AppSettings().lastPresetId
@@ -74,6 +76,8 @@ class DataStoreSettingsRepository(
             prefs[FloatingButton] = settings.quickAccess.floatingButton
             prefs[Notification] = settings.quickAccess.notification
             prefs[NotificationCaptureDelay] = settings.quickAccess.notificationCaptureDelayMillis
+            prefs[ButtonSize] = settings.quickAccess.buttonSizeDp
+            prefs[AttachScreenshotAutomatically] = settings.quickAccess.attachScreenshotAutomatically
             // Position is saved independently by dragging the button, not by the settings form.
         }
         Unit
@@ -95,6 +99,8 @@ class DataStoreSettingsRepository(
         prefs[FloatingButton] ?: true, prefs[Notification] ?: true,
         prefs[ButtonOnRight] ?: true, prefs[ButtonY] ?: 0.35f,
         notificationCaptureDelayMillis = prefs[NotificationCaptureDelay] ?: QuickAccessSettings().notificationCaptureDelayMillis,
+        buttonSizeDp = prefs[ButtonSize] ?: QuickAccessSettings().buttonSizeDp,
+        attachScreenshotAutomatically = prefs[AttachScreenshotAutomatically] ?: QuickAccessSettings().attachScreenshotAutomatically,
     )
 
     private fun encodeAi(configuration: AiConfiguration) = buildJsonObject {
@@ -105,6 +111,7 @@ class DataStoreSettingsRepository(
         put("protocol", api.protocol.name)
         api.reasoningEffort?.let { put("effort", it) }
         put("webSearch", api.webSearch)
+        put("backgroundResponses", api.backgroundResponses)
         put("instructions", configuration.instructions)
     }
 
@@ -116,6 +123,7 @@ class DataStoreSettingsRepository(
             protocol = ApiProtocol.valueOf(value.getValue("protocol").jsonPrimitive.content),
             reasoningEffort = value["effort"]?.jsonPrimitive?.content,
             webSearch = value.getValue("webSearch").jsonPrimitive.boolean,
+            backgroundResponses = value["backgroundResponses"]?.jsonPrimitive?.boolean ?: false,
         ),
         instructions = value.getValue("instructions").jsonPrimitive.content,
     )
@@ -127,6 +135,7 @@ class DataStoreSettingsRepository(
         val Protocol = stringPreferencesKey("protocol")
         val Effort = stringPreferencesKey("reasoning_effort")
         val WebSearch = booleanPreferencesKey("web_search")
+        val BackgroundResponses = booleanPreferencesKey("background_responses")
         val Instructions = stringPreferencesKey("instructions")
         val Presets = stringPreferencesKey("presets")
         // Keep the existing selection slot; it now tracks the most recent choice.
@@ -135,6 +144,8 @@ class DataStoreSettingsRepository(
         val FloatingButton = booleanPreferencesKey("floating_button")
         val Notification = booleanPreferencesKey("notification")
         val NotificationCaptureDelay = intPreferencesKey("notification_capture_delay_ms")
+        val ButtonSize = intPreferencesKey("button_size_dp")
+        val AttachScreenshotAutomatically = booleanPreferencesKey("attach_screenshot_automatically")
         val ButtonOnRight = booleanPreferencesKey("button_on_right")
         val ButtonY = floatPreferencesKey("button_y")
     }

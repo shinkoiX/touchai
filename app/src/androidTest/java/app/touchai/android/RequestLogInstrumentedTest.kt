@@ -25,7 +25,7 @@ class RequestLogInstrumentedTest {
         put("messageCount", 1); put("imageCount", 0); put("instructions", "Test instructions")
     })
 
-    @After fun cleanup() { store?.close(); compose.activity.deleteDatabase(database) }
+    @After fun cleanup() { store?.let { runBlocking { it.clear() }; it.close() }; compose.activity.deleteDatabase(database) }
 
     @Test fun persistenceMarksInterruptedAndClearDoesNotResurrectActiveRequests() = runBlocking {
         var logs = open()
@@ -53,10 +53,27 @@ class RequestLogInstrumentedTest {
         compose.waitUntil(5_000) { compose.onAllNodesWithText("Completed").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("Chat").assertExists()
         compose.onNodeWithText("test-model").performClick()
-        compose.onNodeWithContentDescription("Copy log").assertExists()
+        compose.waitUntil(5_000) { compose.onAllNodesWithContentDescription("Copy log summary").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Export log").assertExists()
         compose.onNodeWithText("Test instructions", substring = true).assertExists()
         compose.onNodeWithContentDescription("Clear logs").performClick()
         compose.onNodeWithText("Clear", useUnmergedTree = true).performClick()
         compose.waitUntil(5_000) { compose.onAllNodesWithText("No requests yet").fetchSemanticsNodes().isNotEmpty() }
+    }
+
+    @Test fun multiMegabyteOutputSurvivesReopenWithoutFillingTheSummaryCursor() = runBlocking {
+        var logs = open()
+        logs.started(record())
+        val output = buildJsonObject { put("text", "Generated"); put("result", "A".repeat(4_000_000)) }
+        val finished = record("Completed").let { it.copy(data = JsonObject(it.data + ("output" to output))) }
+        logs.finished(finished)
+        assertFalse(logs.read(10).single().data.containsKey("output"))
+        assertEquals(output, logs.readDetail(finished.id).data.getValue("output"))
+        logs.close(); logs = open()
+        assertEquals(output, logs.readDetail(finished.id).data.getValue("output"))
+        logs.clear()
+        logs.finished(finished)
+        assertTrue(logs.read(10).isEmpty())
+        assertFalse(java.io.File(compose.activity.filesDir, "$database.output").exists())
     }
 }

@@ -5,6 +5,13 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class OpenAIModelsTest {
+    @Test fun recoverableResponsesExplicitlyEnableStorageAndBackgroundExecution() {
+        val body = buildRequestBody(OpenAIModelConfig(protocol = ApiProtocol.Responses, backgroundResponses = true), request)
+        assertTrue(body.getValue("background").jsonPrimitive.boolean)
+        assertTrue(body.getValue("store").jsonPrimitive.boolean)
+        assertTrue(body.getValue("stream").jsonPrimitive.boolean)
+        assertEquals(body, buildRequestBody(OpenAIModelConfig(protocol = ApiProtocol.Responses, backgroundResponses = true), request.copy(resumeResponseId = "resp_saved")))
+    }
     @Test fun webSearchIsOnByDefaultAndUsesTheSelectedProtocol() {
         ApiProtocol.entries.forEach { protocol ->
             val config = OpenAIModelConfig(model = "test", protocol = protocol)

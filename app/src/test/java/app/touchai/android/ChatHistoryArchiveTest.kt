@@ -17,6 +17,18 @@ class ChatHistoryArchiveTest {
         answer = "Saved answer", status = TurnStatus.Completed, citations = listOf(WebCitation("https://example.com", "Source")))
     private val chat = SavedChat("existing-chat", 1234, "explain", listOf(turn))
 
+    @Test fun generatedImagesSurviveExportAndImport() = runTest {
+        val generated = GeneratedImage("generated", image)
+        history.save(chat.copy(turns = listOf(turn.copy(generatedImages = listOf(generated)))))
+        val output = ByteArrayOutputStream()
+        ChatHistoryArchive(history).exportTo(output)
+        val imported = MemoryChatHistoryRepository()
+        var images = 0
+        ChatHistoryArchive(imported).importFrom(output.toByteArray().inputStream()) { images++ }
+        assertEquals(2, images)
+        assertEquals(listOf(generated), imported.chats.values.single().turns.single().generatedImages)
+    }
+
     private suspend fun archive(): String {
         history.save(chat)
         val output = ByteArrayOutputStream()

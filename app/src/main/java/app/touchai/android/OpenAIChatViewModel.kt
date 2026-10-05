@@ -12,7 +12,6 @@ import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -23,7 +22,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-enum class TurnStatus { Streaming, Completed, Stopped, Incomplete, Failed }
+enum class TurnStatus { Streaming, Recovering, Cancelling, Completed, Stopped, Interrupted, Incomplete, Failed }
 
 data class ChatTurn(
     val user: ChatMessage,
@@ -34,7 +33,14 @@ data class ChatTurn(
     val error: String? = null,
     val searchStatus: String? = null,
     val citations: List<WebCitation> = emptyList(),
-)
+    val generatedImages: List<GeneratedImage> = emptyList(),
+    val imageGenerationStatus: String? = null,
+    val responseId: String? = null,
+    val cancelRequested: Boolean = false,
+    val recoveryStatus: String? = null,
+) {
+    val isRunning: Boolean get() = status in listOf(TurnStatus.Streaming, TurnStatus.Recovering, TurnStatus.Cancelling)
+}
 
 data class OpenAIChatUiState(
     val settings: AppSettings = AppSettings(),
@@ -53,17 +59,19 @@ data class OpenAIChatUiState(
     val connectionResult: String? = null,
     val invoking: Boolean = false,
     val originalImage: Bitmap? = null,
+    val capturedScreenshot: Bitmap? = null,
     val imageCrop: ImageCrop = ImageCrop.Full,
     val cropping: Boolean = false,
     val preparingImage: Boolean = false,
     val prompt: String = "",
     val image: OpenAIImage? = null,
+    val imageAttached: Boolean = false,
     val imagePreview: Bitmap? = null,
     val selectedPreset: String? = null,
     val turns: List<ChatTurn> = emptyList(),
     val error: String? = null,
 ) {
-    val isStreaming: Boolean get() = turns.lastOrNull()?.status == TurnStatus.Streaming
+    val isStreaming: Boolean get() = turns.lastOrNull()?.isRunning == true
     val selectedAi: AiConfiguration get() = settings.aiFor(selectedPreset)
 }
 
@@ -71,19 +79,22 @@ class OpenAIChatViewModel(
     private val history: ChatHistoryRepository,
     private val repository: SettingsRepository,
     private val client: ChatClient,
-    private val closeClient: () -> Unit = {},
+    private val requests: ChatRequestRunner,
     invoked: Boolean = false,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(OpenAIChatUiState(invoking = invoked))
     val uiState = _uiState.asStateFlow()
-    private var streamJob: Job? = null
+    private var requestUpdates: Job? = null
     private var imageJob: Job? = null
     private var captureJob: Job? = null
     private var captureRequested = false
     private var presetSaveJob: Job? = null
     private var historyJob: Job? = null
 
-    init { loadSettings() }
+    init {
+        loadSettings()
+        viewModelScope.launch { requests.recoveryError.collect { error -> error?.let(::reportError) } }
+    }
 
     fun loadSettings() {
         viewModelScope.launch {
@@ -100,7 +111,7 @@ class OpenAIChatViewModel(
     }
 
     fun setPrompt(value: String) = update { it.copy(prompt = value) }
-    fun setImage(value: OpenAIImage?) = update { it.copy(image = value, imagePreview = null, error = null) }
+    fun setImage(value: OpenAIImage?) = update { it.copy(image = value, imageAttached = value != null, imagePreview = null, error = null) }
     fun selectPreset(id: String?) {
         update { it.copy(selectedPreset = id, prompt = presetText(it.settings, id), settings = it.settings.copy(lastPresetId = id)) }
         presetSaveJob?.cancel()
@@ -115,13 +126,13 @@ class OpenAIChatViewModel(
         settingsDraft = if (open) it.settings else null, error = null, connectionResult = null) }
     fun showLogs(open: Boolean) = update { it.copy(logsOpen = open) }
     fun showHistory(open: Boolean) {
-        if (_uiState.value.isStreaming || _uiState.value.historyTransferring) return
+        if (_uiState.value.historyTransferring) return
         historyJob?.cancel()
         update { it.copy(historyOpen = open, historyLoading = open, historyNotice = null, error = null) }
         if (open) historyJob = viewModelScope.launch {
             try {
-                streamJob?.join()
-                val entries = history.list()
+                val entries = (history.list() + requests.active.value.values.map { it.state.value.entry })
+                    .associateBy { it.id }.values.sortedByDescending { it.updatedAt }
                 update { it.copy(historyEntries = entries) }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { reportError("Could not load chat history: ${error.message}") }
@@ -153,17 +164,21 @@ class OpenAIChatViewModel(
     }
 
     fun openChat(id: String) {
-        if (_uiState.value.historyLoading || _uiState.value.isStreaming) return
+        if (_uiState.value.historyLoading) return
         update { it.copy(historyLoading = true, error = null) }
         historyJob = viewModelScope.launch {
             try {
-                val chat = history.load(id)
+                requests.restorePending()
+                val active = requests.find(id)
+                val chat = active?.state?.value ?: history.load(id)
                 val settings = repository.load()
                 val selected = chat.selectedPreset?.takeIf { id -> settings.presets.any { it.id == id } }
                 imageJob?.cancel()
                 update { it.copy(chatId = chat.id, turns = chat.turns, settings = settings, ready = true,
-                    selectedPreset = selected, prompt = "", image = null, imagePreview = null, originalImage = null,
+                    selectedPreset = selected, prompt = "", image = null, imageAttached = false, imagePreview = null, originalImage = null, capturedScreenshot = null,
                     imageCrop = ImageCrop.Full, cropping = false, preparingImage = false, historyOpen = false) }
+                requestUpdates?.cancel()
+                active?.let(::observeRequest)
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { reportError("Could not open chat: ${error.message}") }
             finally { if (currentCoroutineContext().isActive) update { it.copy(historyLoading = false) } }
@@ -171,7 +186,8 @@ class OpenAIChatViewModel(
     }
 
     fun deleteChat(id: String) {
-        if (_uiState.value.historyLoading || _uiState.value.isStreaming) return
+        if (_uiState.value.historyLoading) return
+        if (requests.find(id) != null) { reportError("Stop the request before deleting this chat."); return }
         update { it.copy(historyLoading = true, error = null) }
         historyJob = viewModelScope.launch {
             try {
@@ -198,28 +214,32 @@ class OpenAIChatViewModel(
         captureRequested = true
         update { it.copy(invoking = true, settingsOpen = false, logsOpen = false, settingsDraft = null) }
         captureJob = viewModelScope.launch {
-            streamJob?.cancelAndJoin()
+            requestUpdates?.cancel()
             imageJob?.cancelAndJoin()
-            update { it.copy(chatId = UUID.randomUUID().toString(), turns = emptyList(), image = null, imagePreview = null, originalImage = null,
+            update { it.copy(chatId = UUID.randomUUID().toString(), turns = emptyList(), image = null, imageAttached = false, imagePreview = null, originalImage = null, capturedScreenshot = null,
                 cropping = false, preparingImage = false, error = null) }
             try {
                 val bitmap = capture()
                 presetSaveJob?.join()
                 val settings = repository.load()
                 update { it.copy(settings = settings, ready = true, selectedPreset = rememberedPreset(settings),
-                    prompt = presetText(settings, rememberedPreset(settings)), invoking = false) }
-                attachImage(bitmap)
+                    prompt = presetText(settings, rememberedPreset(settings)), invoking = false, capturedScreenshot = bitmap) }
+                attachImage(bitmap, attached = settings.quickAccess.attachScreenshotAutomatically)
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { update { it.copy(invoking = false, error = error.message ?: "Screen capture failed. Continue without an image.") } }
         }
     }
 
-    fun attachImage(bitmap: Bitmap) {
+    fun attachImage(bitmap: Bitmap, attached: Boolean = true) {
         imageJob?.cancel()
-        update { it.copy(originalImage = bitmap, imagePreview = bitmap, image = null, imageCrop = ImageCrop.Full,
+        update { it.copy(originalImage = bitmap, imagePreview = bitmap, image = null, imageAttached = attached, imageCrop = ImageCrop.Full,
             cropping = false, error = null) }
         prepareImage(bitmap, ImageCrop.Full)
     }
+
+    fun attachScreenshot() { _uiState.value.capturedScreenshot?.let { attachImage(it) } }
+
+    fun toggleImageAttachment() = update { it.copy(imageAttached = !it.imageAttached, error = null) }
 
     fun openCrop() { update { it.copy(cropping = it.originalImage != null) } }
     fun closeCrop() { update { it.copy(cropping = false) } }
@@ -247,9 +267,7 @@ class OpenAIChatViewModel(
     }
 
     fun removeImage() {
-        imageJob?.cancel()
-        update { it.copy(originalImage = null, image = null, imagePreview = null, imageCrop = ImageCrop.Full,
-            cropping = false, preparingImage = false, error = null) }
+        update { it.copy(imageAttached = false, cropping = false, error = null) }
     }
 
     fun saveSettings(settings: AppSettings) {
@@ -302,16 +320,19 @@ class OpenAIChatViewModel(
 
     fun submit() {
         val snapshot = _uiState.value
-        if (!snapshot.ready || snapshot.isStreaming || snapshot.savingSettings || snapshot.preparingImage || snapshot.cropping || (snapshot.originalImage != null && snapshot.image == null)) return
+        if (!snapshot.ready || snapshot.isStreaming || snapshot.savingSettings || snapshot.cropping ||
+            (snapshot.imageAttached && (snapshot.preparingImage || (snapshot.originalImage != null && snapshot.image == null)))) return
         val ai = snapshot.selectedAi
         val error = apiError(ai.api, requireCredentials = true)
         if (error != null) { update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = error) }; return }
         val preset = snapshot.settings.presets.find { it.id == snapshot.selectedPreset }
         val prompt = snapshot.prompt.trim()
-        if (prompt.isBlank() && snapshot.image == null) { reportError("Enter a message, choose a preset, or attach an image."); return }
-        val user = ChatMessage(MessageRole.User, prompt, listOfNotNull(snapshot.image))
-        update { it.copy(prompt = "", image = null, imagePreview = null, originalImage = null, imageCrop = ImageCrop.Full, error = null,
-            turns = it.turns + ChatTurn(user, ai, preset?.name)) }
+        val image = snapshot.image.takeIf { snapshot.imageAttached }
+        if (prompt.isBlank() && image == null) { reportError("Enter a message, choose a preset, or attach an image."); return }
+        val user = ChatMessage(MessageRole.User, prompt, listOfNotNull(image))
+        imageJob?.cancel()
+        update { it.copy(prompt = "", image = null, imageAttached = false, imagePreview = null, originalImage = null, capturedScreenshot = null, imageCrop = ImageCrop.Full, error = null,
+            preparingImage = false, turns = it.turns + ChatTurn(user, ai, preset?.name)) }
         startRequest()
     }
 
@@ -325,59 +346,45 @@ class OpenAIChatViewModel(
         }?.apiKey.orEmpty())
         val error = apiError(api, requireCredentials = true)
         if (error != null) { reportError(error); return }
-        updateLast { it.copy(ai = it.ai.copy(api = api), answer = "", status = TurnStatus.Streaming, error = null, searchStatus = null, citations = emptyList()) }
-        startRequest(RequestPurpose.Retry)
+        val resume = snapshot.turns.last().status == TurnStatus.Interrupted && snapshot.turns.last().responseId != null && api.backgroundResponses
+        if (resume) {
+            updateLast { it.copy(ai = it.ai.copy(api = api), status = TurnStatus.Recovering, error = null, cancelRequested = false) }
+            startRequest(RequestPurpose.Resume)
+        } else {
+            updateLast { it.copy(ai = it.ai.copy(api = api), answer = "", status = TurnStatus.Streaming, error = null, searchStatus = null,
+                citations = emptyList(), generatedImages = emptyList(), imageGenerationStatus = null, responseId = null, cancelRequested = false) }
+            startRequest(RequestPurpose.Retry)
+        }
     }
 
     private fun startRequest(purpose: RequestPurpose = RequestPurpose.Chat) {
         val snapshot = _uiState.value
-        val turn = snapshot.turns.last()
-        val messages = snapshot.turns.dropLast(1).filter { it.status == TurnStatus.Completed }.flatMap {
-            listOf(it.user, ChatMessage(MessageRole.Assistant, it.answer))
-        } + turn.user
-        streamJob = viewModelScope.launch {
-            val buffer = StreamingTextBuffer(this) { delta -> updateLast { it.copy(answer = it.answer + delta) } }
-            try {
-                persistChat(snapshot)
-                client.stream(turn.ai.api, OpenAIRequest(messages, turn.ai.instructions, purpose, turn.presetName)).collect { event ->
-                    when (event) {
-                        is OpenAIStreamEvent.TextDelta -> buffer.append(event.text)
-                        is OpenAIStreamEvent.Completed -> buffer.flush()
-                        is OpenAIStreamEvent.SearchStatus -> updateLast { it.copy(searchStatus = event.status) }
-                        is OpenAIStreamEvent.Citation -> updateLast { it.copy(citations = (it.citations + event.source).distinct()) }
-                    }
-                }
-                updateLast { it.copy(status = TurnStatus.Completed) }
-            } catch (error: CancellationException) {
-                buffer.flush(); updateLast { it.copy(status = TurnStatus.Stopped) }; throw error
-            } catch (error: IncompleteResponseException) {
-                buffer.flush(); updateLast { it.copy(status = TurnStatus.Incomplete, error = error.message) }
-            } catch (error: Exception) {
-                buffer.flush(); updateLast { it.copy(status = TurnStatus.Failed, error = error.message ?: "Request failed.") }
-            } finally {
-                buffer.flush()
-                val finished = _uiState.value
-                withContext(NonCancellable) { persistChat(finished) }
+        try {
+            observeRequest(requests.start(SavedChat(snapshot.chatId, System.currentTimeMillis(), snapshot.selectedPreset, snapshot.turns), purpose))
+        } catch (error: Exception) {
+            updateLast { it.copy(status = TurnStatus.Failed, error = "Could not start background work: ${error.message}") }
+        }
+    }
+
+    private fun observeRequest(handle: ActiveChatRequest) {
+        requestUpdates?.cancel()
+        requestUpdates = viewModelScope.launch {
+            handle.state.collect { saved ->
+                update { if (it.chatId == saved.id) it.copy(turns = saved.turns) else it }
             }
         }
     }
 
-    private suspend fun persistChat(state: OpenAIChatUiState) {
-        try { history.save(SavedChat(state.chatId, System.currentTimeMillis(), state.selectedPreset, state.turns)) }
-        catch (error: CancellationException) { throw error }
-        catch (error: Exception) { reportError("Could not save chat: ${error.message}") }
-    }
-
-    fun cancel() { streamJob?.cancel() }
+    fun cancel() { requests.stop(_uiState.value.chatId) }
     fun newChat() {
-        if (_uiState.value.isStreaming || _uiState.value.preparingImage || _uiState.value.historyLoading) return
+        if (_uiState.value.preparingImage || _uiState.value.historyLoading) return
+        requestUpdates?.cancel()
         showHistory(false)
-        update { it.copy(chatId = UUID.randomUUID().toString(), ready = false, turns = emptyList(), prompt = "", image = null, imagePreview = null,
-            originalImage = null, imageCrop = ImageCrop.Full, cropping = false, error = null) }
+        update { it.copy(chatId = UUID.randomUUID().toString(), ready = false, turns = emptyList(), prompt = "", image = null, imageAttached = false, imagePreview = null,
+            originalImage = null, capturedScreenshot = null, imageCrop = ImageCrop.Full, cropping = false, error = null) }
         loadSettings()
     }
 
-    override fun onCleared() { closeClient(); super.onCleared() }
     private fun updateLast(transform: (ChatTurn) -> ChatTurn) = update { it.copy(turns = it.turns.dropLast(1) + transform(it.turns.last())) }
     private fun update(transform: (OpenAIChatUiState) -> OpenAIChatUiState) { _uiState.update(transform) }
     private fun rememberedPreset(settings: AppSettings) = settings.lastPresetId?.takeIf { id -> settings.presets.any { it.id == id } }

@@ -20,18 +20,19 @@ class SettingsPersistenceTest {
     @Test fun settingsSurviveRepositoryRecreationWithoutStoringThePlainApiKey() = runBlocking {
         val file = temporaryFolder.newFolder().resolve("settings.preferences_pb")
         val settings = AppSettings(
-            api = OpenAIModelConfig(apiKey = "test-secret-never-plaintext", model = "test", protocol = ApiProtocol.Responses, reasoningEffort = "low"),
+            api = OpenAIModelConfig(apiKey = "test-secret-never-plaintext", model = "test", protocol = ApiProtocol.Responses, reasoningEffort = "low", backgroundResponses = true),
             instructions = "Be concise",
             presets = listOf(PromptPreset("test", "Explain", "Explain this image", AiConfiguration(
                 OpenAIModelConfig(apiKey = "another-preset-secret", model = "another-model", baseUrl = "https://preset.example.com/v1", webSearch = false), "Preset instructions"))),
             lastPresetId = "test", imageQuality = ImageQuality.Original,
-            quickAccess = QuickAccessSettings(floatingButton = false, notificationCaptureDelayMillis = 650),
+            quickAccess = QuickAccessSettings(floatingButton = false, notificationCaptureDelayMillis = 650,
+                buttonSizeDp = 80, attachScreenshotAutomatically = false),
         )
         val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
             val store = PreferenceDataStoreFactory.create(scope = firstScope) { file }
             val repository = DataStoreSettingsRepository(store, cipher)
-            assertEquals(200, repository.load().quickAccess.notificationCaptureDelayMillis)
+            assertEquals(QuickAccessSettings(), repository.load().quickAccess)
             repository.save(settings)
             repository.rememberPreset("test")
             assertEquals(settings, repository.load())
@@ -57,6 +58,24 @@ class SettingsPersistenceTest {
             repository.save(settings.copy(presets = emptyList()))
             assertNull(repository.load().lastPresetId)
         } finally { secondScope.coroutineContext[Job]!!.cancelAndJoin() }
+    }
+
+    @Test fun reorderedPresetsKeepTheirSelectedIdAndPersistTheirSequence() = runBlocking {
+        val file = temporaryFolder.newFolder().resolve("reordered.preferences_pb")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val store = PreferenceDataStoreFactory.create(scope = scope) { file }
+            val repository = DataStoreSettingsRepository(store, cipher)
+            val original = AppSettings()
+            repository.save(original)
+            repository.rememberPreset("translate")
+            val reordered = original.copy(presets = listOf(original.presets[2], original.presets[0], original.presets[1]))
+            repository.save(reordered)
+            val loaded = DataStoreSettingsRepository(store, cipher).load()
+            assertEquals(listOf("summarize", "explain", "translate"), loaded.presets.map { it.id })
+            assertEquals("translate", loaded.lastPresetId)
+            assertEquals(original.presets.associateBy { it.id }, loaded.presets.associateBy { it.id })
+        } finally { scope.coroutineContext[Job]!!.cancelAndJoin() }
     }
 
     @Test fun encryptionUsesFreshNoncesAndRoundTrips() {

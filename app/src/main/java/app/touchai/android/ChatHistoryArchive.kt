@@ -36,11 +36,13 @@ class ChatHistoryArchive(private val history: ChatHistoryRepository) {
             val chats = archive.getValue("chats").jsonArray.map { item ->
                 val value = item.jsonObject
                 val turns = value.getValue("turns").jsonArray.map { serialized ->
-                    val turn = decodeChatTurn(serialized.jsonObject, apiKey = "")
+                    val decoded = decodeChatTurn(serialized.jsonObject, apiKey = "")
+                    val turn = decoded.copy(responseId = null, cancelRequested = false,
+                        status = if (decoded.isRunning) TurnStatus.Interrupted else decoded.status)
                     require(apiError(turn.ai.api, requireCredentials = false) == null) { "A chat contains an invalid AI endpoint." }
                     require(turn.ai.api.timeoutMillis > 0) { "A chat contains an invalid request timeout." }
-                    turn.user.images.forEach { image ->
-                        require(image.url.startsWith("data:image/png;base64,") || image.url.startsWith("data:image/jpeg;base64,")) {
+                    (turn.user.images + turn.generatedImages.map { it.image }).forEach { image ->
+                        require(listOf("png", "jpeg", "webp").any { image.url.startsWith("data:image/$it;base64,") }) {
                             "A chat contains an unsupported image."
                         }
                         require(image.detail in listOf("auto", "low", "high")) { "A chat contains an invalid image detail." }

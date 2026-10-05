@@ -48,7 +48,7 @@ class ChatHistoryTransferInstrumentedTest {
         }
         lateinit var viewModel: OpenAIChatViewModel
         compose.runOnUiThread {
-            viewModel = OpenAIChatViewModel(history, repository, client)
+            viewModel = testChatViewModel(history, repository, client)
             models.put("transfer", viewModel)
             viewModel.showHistory(true)
         }

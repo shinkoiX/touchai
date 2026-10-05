@@ -2,21 +2,48 @@ package app.touchai.core.openai
 
 import io.ktor.client.HttpClient
 import io.ktor.client.plugins.timeout
+import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.request.*
 import io.ktor.client.statement.bodyAsChannel
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.*
 import io.ktor.utils.io.readAvailable
 import java.io.ByteArrayOutputStream
+import java.io.IOException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.FlowCollector
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.*
 
 class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
     override fun stream(config: OpenAIModelConfig, request: OpenAIRequest): Flow<OpenAIStreamEvent> = flow {
+        var responseId = request.resumeResponseId
+        if (responseId != null) {
+            pollResponse(config, responseId)
+        } else {
+            emitAll(createStream(config, request) { responseId = it }.catch { error ->
+                if (error is CancellationException) throw error
+                if (error !is IOException && error !is HttpRequestTimeoutException && error !is ResponseInterruptedException) throw error
+                val id = responseId
+                if (id != null && config.backgroundResponses) {
+                    emit(OpenAIStreamEvent.RecoveryStatus("Reconnecting…"))
+                    pollResponse(config, id)
+                } else throw ResponseInterruptedException(
+                    if (config.backgroundResponses) "Connection interrupted before a response ID was received. The request cannot be recovered safely."
+                    else "Connection interrupted. This request does not support server-side recovery.", error)
+            })
+        }
+    }
+
+    private fun createStream(config: OpenAIModelConfig, request: OpenAIRequest, onCheckpoint: (String) -> Unit): Flow<OpenAIStreamEvent> = flow {
+        var responseId: String? = null
         httpClient.preparePost(buildRequestUrl(config)) {
             header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
             accept(ContentType.Text.EventStream)
@@ -26,6 +53,7 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
         }.execute { response ->
             if (!response.status.isSuccess()) {
                 val body = response.bodyAsText()
+                emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(body)))
                 val message = try {
                     (Json.parseToJsonElement(body).jsonObject["error"] as? JsonObject)?.string("message")
                 } catch (_: SerializationException) {
@@ -36,6 +64,7 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                 throw OpenAIRequestException("HTTP ${response.status.value}: ${message ?: response.status.description}", response.status.value)
             }
             if (response.contentType()?.match(ContentType.Text.EventStream) != true) {
+                emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(response.bodyAsText())))
                 throw OpenAIStreamException("The endpoint did not return an event stream. Check the API protocol.")
             }
 
@@ -43,14 +72,39 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
             val channel = response.bodyAsChannel()
             val bytes = ByteArray(8192)
             var completed = false
+            val receivedText = StringBuilder()
+            val imageIds = mutableSetOf<String>()
             streamLoop@ while (!completed) {
                 currentCoroutineContext().ensureActive()
                 val count = channel.readAvailable(bytes, 0, bytes.size)
                 if (count == -1) break
                 for (event in parser.accept(bytes, count)) {
                     if (event.data == "[DONE]") break@streamLoop
-                    val decoded = decodeStreamEvent(config.protocol, event)
-                    decoded.deltas.forEach { emit(OpenAIStreamEvent.TextDelta(it)) }
+                    if (event.data.isBlank()) continue
+                    val payload = try { parseStreamPayload(event.data) }
+                    catch (error: OpenAIStreamException) {
+                        emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(event.data)))
+                        throw error
+                    }
+                    emit(OpenAIStreamEvent.ResponsePayload(payload))
+                    if (config.protocol == ApiProtocol.Responses && config.backgroundResponses && responseId == null) {
+                        (payload["response"] as? JsonObject)?.string("id")?.let {
+                            responseId = it
+                            onCheckpoint(it)
+                            emit(OpenAIStreamEvent.ResponseCheckpoint(it))
+                        }
+                    }
+                    val decoded = decodeStreamPayload(config.protocol, payload, event.name)
+                    decoded.deltas.forEach { receivedText.append(it); emit(OpenAIStreamEvent.TextDelta(it)) }
+                    decoded.finalText?.let { finalText ->
+                        if (finalText.startsWith(receivedText.toString()) && finalText.length > receivedText.length) {
+                            val remaining = finalText.substring(receivedText.length)
+                            receivedText.append(remaining)
+                            emit(OpenAIStreamEvent.TextDelta(remaining))
+                        }
+                    }
+                    decoded.images.forEach { if (imageIds.add(it.id)) emit(OpenAIStreamEvent.ImageGenerated(it)) }
+                    if (decoded.imageStatusChanged) emit(OpenAIStreamEvent.ImageGenerationStatus(decoded.imageStatus))
                     decoded.searchStatus?.let { emit(OpenAIStreamEvent.SearchStatus(it)) }
                     decoded.citations.forEach { emit(OpenAIStreamEvent.Citation(it)) }
                     decoded.failure?.let { throw it }
@@ -62,7 +116,66 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                 }
             }
             if (!completed) {
-                throw IncompleteResponseException("the connection ended before completion was confirmed")
+                throw ResponseInterruptedException("The connection ended before completion was confirmed.")
+            }
+        }
+    }
+
+    suspend fun cancelResponse(config: OpenAIModelConfig, id: String): JsonObject {
+        val response = httpClient.post("${buildRequestUrl(config)}/${id.encodeURLPathPart()}/cancel") {
+            header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+            contentType(ContentType.Application.Json); accept(ContentType.Application.Json)
+            timeout { requestTimeoutMillis = config.timeoutMillis.coerceAtMost(15_000L) }
+            setBody("{}")
+        }
+        val body = response.bodyAsText()
+        if (!response.status.isSuccess()) throw OpenAIRequestException("Could not cancel response: HTTP ${response.status.value}.", response.status.value)
+        return Json.parseToJsonElement(body).jsonObject
+    }
+
+    private suspend fun FlowCollector<OpenAIStreamEvent>.pollResponse(config: OpenAIModelConfig, id: String) {
+        emit(OpenAIStreamEvent.ResponseCheckpoint(id))
+        var retryMillis = 1_000L
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val response = try {
+                val result = httpClient.get("${buildRequestUrl(config)}/${id.encodeURLPathPart()}") {
+                    header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+                    accept(ContentType.Application.Json)
+                    timeout { requestTimeoutMillis = config.timeoutMillis }
+                }
+                val body = result.bodyAsText()
+                if (!result.status.isSuccess()) throw OpenAIRequestException("Could not recover response: HTTP ${result.status.value}.", result.status.value)
+                Json.parseToJsonElement(body).jsonObject
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                if (!isTransientResponseError(error)) throw ResponseInterruptedException("Could not retrieve the saved response: ${error.message}", error)
+                emit(OpenAIStreamEvent.RecoveryStatus("Waiting for connection…"))
+                delay(retryMillis)
+                retryMillis = (retryMillis * 2).coerceAtMost(30_000)
+                continue
+            }
+            retryMillis = 1_000L
+            emit(OpenAIStreamEvent.ResponsePayload(response))
+            when (response.string("status")) {
+                "queued", "in_progress" -> {
+                    emit(OpenAIStreamEvent.RecoveryStatus("Waiting for response…"))
+                    delay(2_000)
+                }
+                "completed", "cancelled", "failed", "incomplete" -> {
+                    val output = readResponseOutput(response)
+                    emit(OpenAIStreamEvent.TextSnapshot(output.text))
+                    output.images.forEach { emit(OpenAIStreamEvent.ImageGenerated(it)) }
+                    output.citations.forEach { emit(OpenAIStreamEvent.Citation(it)) }
+                    emit(OpenAIStreamEvent.RecoveryStatus(null))
+                    when (response.string("status")) {
+                        "completed" -> { emit(OpenAIStreamEvent.Completed(response)); return }
+                        "cancelled" -> throw ResponseCancelledException(response)
+                        "incomplete" -> throw incomplete((response["incomplete_details"] as? JsonObject)?.string("reason") ?: "generation stopped early")
+                        else -> throw OpenAIRequestException((response["error"] as? JsonObject)?.string("message") ?: "The API response failed.")
+                    }
+                }
+                else -> throw OpenAIStreamException("The saved response has an unsupported status.")
             }
         }
     }
@@ -70,14 +183,19 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
     suspend fun complete(config: OpenAIModelConfig, request: OpenAIRequest): OpenAICompletion {
         val text = StringBuilder()
         var response: JsonObject? = null
+        val images = mutableListOf<GeneratedImage>()
         stream(config, request).collect { event ->
             when (event) {
                 is OpenAIStreamEvent.TextDelta -> text.append(event.text)
+                is OpenAIStreamEvent.TextSnapshot -> { text.clear(); text.append(event.text) }
                 is OpenAIStreamEvent.Completed -> response = event.response
-                is OpenAIStreamEvent.SearchStatus, is OpenAIStreamEvent.Citation -> Unit
+                is OpenAIStreamEvent.ImageGenerated -> images += event.value
+                is OpenAIStreamEvent.SearchStatus, is OpenAIStreamEvent.Citation,
+                is OpenAIStreamEvent.ImageGenerationStatus, is OpenAIStreamEvent.ResponsePayload -> Unit
+                is OpenAIStreamEvent.ResponseCheckpoint, is OpenAIStreamEvent.RecoveryStatus -> Unit
             }
         }
-        return OpenAICompletion(text.toString(), response!!)
+        return OpenAICompletion(text.toString(), response!!, images.distinctBy { it.id })
     }
 }
 
@@ -88,6 +206,10 @@ internal data class DecodedEvent(
     val failure: Exception? = null,
     val searchStatus: String? = null,
     val citations: List<WebCitation> = emptyList(),
+    val images: List<GeneratedImage> = emptyList(),
+    val finalText: String? = null,
+    val imageStatus: String? = null,
+    val imageStatusChanged: Boolean = false,
 )
 
 /** Decode UTF-8 only after collecting a whole line, including across HTTP chunk boundaries. */
@@ -135,23 +257,28 @@ internal class SseParser {
 
 internal fun decodeStreamEvent(protocol: ApiProtocol, event: SseEvent): DecodedEvent {
     if (event.data.isBlank()) return DecodedEvent()
-    val payload = try {
-        Json.parseToJsonElement(event.data).jsonObject
+    return decodeStreamPayload(protocol, parseStreamPayload(event.data), event.name)
+}
+
+private fun parseStreamPayload(data: String): JsonObject = try {
+        Json.parseToJsonElement(data).jsonObject
     } catch (_: SerializationException) {
         throw OpenAIStreamException("The endpoint returned invalid stream JSON.")
     } catch (_: IllegalArgumentException) {
         throw OpenAIStreamException("The endpoint returned an invalid stream event.")
     }
+
+private fun decodeStreamPayload(protocol: ApiProtocol, payload: JsonObject, name: String?): DecodedEvent {
     payload["error"]?.takeUnless { it == JsonNull }?.let { error ->
         val message = (error as? JsonObject)?.string("message") ?: "The API reported an error."
         return DecodedEvent(failure = OpenAIRequestException(message))
     }
-    if (payload.string("type") == "error" || event.name == "error") {
+    if (payload.string("type") == "error" || name == "error") {
         return DecodedEvent(failure = OpenAIRequestException(payload.string("message") ?: "The API reported a stream error."))
     }
     return when (protocol) {
         ApiProtocol.ChatCompletions -> decodeChatEvent(payload)
-        ApiProtocol.Responses -> decodeResponseEvent(payload, event.name)
+        ApiProtocol.Responses -> decodeResponseEvent(payload, name)
     }
 }
 
@@ -168,6 +295,12 @@ private fun decodeChatEvent(payload: JsonObject): DecodedEvent {
         completed = if (finish == "stop") payload else null,
         failure = if (finish != null && finish != "stop") incomplete(finish) else null,
         citations = parseCitations(delta?.get("annotations")),
+        images = (delta?.get("images") as? JsonArray).orEmpty().mapIndexed { index, element ->
+            val image = element.jsonObject
+            val url = (image["image_url"] as? JsonObject)?.string("url")
+                ?: throw OpenAIStreamException("The generated image did not include an image URL.")
+            GeneratedImage("${payload.string("id")}:image:${choice["index"] ?: 0}:${image["index"] ?: index}", OpenAIImage(url))
+        },
     )
 }
 
@@ -187,17 +320,13 @@ private fun decodeResponseEvent(payload: JsonObject, name: String?): DecodedEven
         "response.completed" -> {
             val response = payload["response"] as? JsonObject
                 ?: throw OpenAIStreamException("The completion event did not include response data.")
-            var textOffset = 0
-            val citations = (response["output"] as? JsonArray).orEmpty().flatMap { item ->
-                (item.jsonObject["content"] as? JsonArray).orEmpty().flatMap { content ->
-                    val part = content.jsonObject
-                    val sources = parseCitations(part["annotations"], textOffset)
-                    textOffset += (part.string("text") ?: part.string("refusal")).orEmpty().length
-                    sources
-                }
-            }
-            DecodedEvent(completed = response, citations = citations)
+            val output = readResponseOutput(response)
+            DecodedEvent(completed = response, citations = output.citations, images = output.images, finalText = output.text)
         }
+        "response.output_item.done" -> DecodedEvent(images = listOfNotNull((payload["item"] as? JsonObject)?.let(::generatedImage)))
+        "response.image_generation_call.in_progress", "response.image_generation_call.generating" ->
+            DecodedEvent(imageStatus = "Generating image…", imageStatusChanged = true)
+        "response.image_generation_call.completed" -> DecodedEvent(imageStatusChanged = true)
         "response.web_search_call.in_progress" -> DecodedEvent(searchStatus = "Preparing web search…")
         "response.web_search_call.searching" -> DecodedEvent(searchStatus = "Searching the web…")
         "response.web_search_call.completed" -> DecodedEvent(searchStatus = "Web search complete")
@@ -215,9 +344,46 @@ private fun decodeResponseEvent(payload: JsonObject, name: String?): DecodedEven
                 (response?.get("incomplete_details") as? JsonObject)?.string("reason") ?: "generation stopped early",
             ))
         }
+        "response.cancelled" -> {
+            val response = payload.getValue("response").jsonObject
+            val output = readResponseOutput(response)
+            DecodedEvent(failure = ResponseCancelledException(response), images = output.images, citations = output.citations, finalText = output.text)
+        }
         null -> throw OpenAIStreamException("Expected Responses events. Check the API protocol.")
-        else -> DecodedEvent() // Lifecycle and other non-text events do not change the answer.
+        else -> DecodedEvent() // Other lifecycle events do not change the answer.
     }
+
+fun readResponseOutput(response: JsonObject): ResponseOutput {
+    var textOffset = 0
+    val text = StringBuilder()
+    val citations = mutableListOf<WebCitation>()
+    val items = (response["output"] as? JsonArray).orEmpty()
+    items.filter { it.jsonObject.string("type") == "message" }.forEach { item ->
+        (item.jsonObject["content"] as? JsonArray).orEmpty().forEach { content ->
+            val part = content.jsonObject
+            citations += parseCitations(part["annotations"], textOffset)
+            val value = (part.string("text") ?: part.string("refusal")).orEmpty()
+            text.append(value); textOffset += value.length
+        }
+    }
+    return ResponseOutput(text.toString(), items.mapNotNull { generatedImage(it.jsonObject) }, citations)
+}
+
+fun isTransientResponseError(error: Exception): Boolean = error is IOException || error is HttpRequestTimeoutException ||
+    (error is OpenAIRequestException && (error.httpStatus in listOf(408, 429) || (error.httpStatus ?: 0) >= 500))
+
+private fun generatedImage(item: JsonObject): GeneratedImage? {
+    if (item.string("type") != "image_generation_call") return null
+    val result = item.string("result")?.takeIf { it.isNotEmpty() } ?: return null
+    val id = item.string("id") ?: throw OpenAIStreamException("The generated image did not include an ID.")
+    val mime = when (item.string("output_format") ?: "png") {
+        "png" -> "image/png"
+        "jpeg", "jpg" -> "image/jpeg"
+        "webp" -> "image/webp"
+        else -> throw OpenAIStreamException("The generated image uses an unsupported format.")
+    }
+    return GeneratedImage(id, OpenAIImage("data:$mime;base64,$result"))
+}
 
 internal fun JsonObject.string(key: String): String? = (get(key) as? JsonPrimitive)?.contentOrNull
 

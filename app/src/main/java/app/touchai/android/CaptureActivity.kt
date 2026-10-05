@@ -43,6 +43,8 @@ class CaptureActivity : ComponentActivity() {
         if (hasFocus && intent.action != RestoreChat) requestCapture()
     }
 
+    override fun onStart() { super.onStart(); app.restorePendingRequests() }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)

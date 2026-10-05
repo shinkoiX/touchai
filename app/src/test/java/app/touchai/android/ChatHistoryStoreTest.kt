@@ -18,6 +18,7 @@ class ChatHistoryStoreTest {
             reasoningEffort = "high", webSearch = false, timeoutMillis = 90_000), "Be concise"),
         presetName = "Explain", answer = "The answer", status = TurnStatus.Completed,
         citations = listOf(WebCitation("https://example.com/source", "Source", 0, 4)),
+        generatedImages = listOf(GeneratedImage("generated", OpenAIImage("data:image/png;base64," + "B".repeat(3_000_000)))),
     )
 
     @Test fun recreationPreservesLargeAttachmentsAndConfigurationWithoutPlaintextKeys() = runBlocking {
@@ -45,10 +46,12 @@ class ChatHistoryStoreTest {
         assertEquals(listOf("second"), store.list().map { it.id })
     }
 
-    @Test fun interruptedRequestsReopenAsStopped() = runBlocking {
+    @Test fun pendingRequestsRetainRecoveryStateAcrossReopening() = runBlocking {
         val store = ChatHistoryStore(temporaryFolder.newFolder(), cipher)
-        store.save(SavedChat("interrupted", 10, null, listOf(turn.copy(status = TurnStatus.Streaming, answer = "Partial"))))
-        assertEquals(TurnStatus.Stopped, store.load("interrupted").turns.single().status)
+        store.save(SavedChat("interrupted", 10, null, listOf(turn.copy(status = TurnStatus.Streaming, answer = "Partial", responseId = "resp_test"))))
+        assertTrue(store.list().single().pending)
+        assertEquals(TurnStatus.Streaming, store.load("interrupted").turns.single().status)
+        assertEquals("resp_test", store.load("interrupted").turns.single().responseId)
         assertEquals("Partial", store.load("interrupted").turns.single().answer)
     }
 }

@@ -50,8 +50,9 @@ fun ChatHistoryScreen(state: OpenAIChatUiState, onOpen: (String) -> Unit, onDele
                             Text(entry.title, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
                             Text(dateFormat.format(Date(entry.updatedAt)), style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (entry.pending) Text("Running", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                         }
-                        AppIconButton(R.drawable.ic_delete, "Delete chat", { deleting = entry }, enabled = !state.historyLoading)
+                        AppIconButton(R.drawable.ic_delete, "Delete chat", { deleting = entry }, enabled = !state.historyLoading && !entry.pending)
                     }
                 }
             }

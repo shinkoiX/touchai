@@ -2,6 +2,7 @@ package app.touchai.android
 
 import android.app.Activity
 import android.app.Application
+import android.content.Intent
 import android.os.Bundle
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
@@ -11,6 +12,10 @@ import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
 import java.io.File
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 
 class TouchAiApplication : Application() {
     val settingsRepository by lazy { DataStoreSettingsRepository(settingsDataStore, ApiKeyCipher()) }
@@ -37,15 +42,26 @@ class TouchAiApplication : Application() {
         })
     }
 
-    fun chatViewModelFactory(invoked: Boolean = false) = viewModelFactory {
-        initializer {
-            val client = HttpClient(OkHttp) {
-                expectSuccess = false
-                followRedirects = false
-                install(HttpTimeout) { connectTimeoutMillis = 15_000; socketTimeoutMillis = 120_000 }
-                engine { config { retryOnConnectionFailure(false) } }
-            }
-            OpenAIChatViewModel(chatHistory, settingsRepository, LoggingChatClient(OpenAIModel(client), requestLogs), client::close, invoked)
+    private val requestScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val httpClient by lazy {
+        HttpClient(OkHttp) {
+            expectSuccess = false
+            followRedirects = false
+            install(HttpTimeout) { connectTimeoutMillis = 15_000; socketTimeoutMillis = 120_000 }
+            engine { config { retryOnConnectionFailure(false) } }
         }
+    }
+    private val responseClient by lazy { OpenAIModel(httpClient) }
+    private val chatClient by lazy { LoggingChatClient(responseClient, requestLogs) }
+    val requests by lazy {
+        ChatRequestRunner(chatHistory, chatClient, responseClient::cancelResponse, requestScope,
+            onWorkStarted = { RequestService.start(this) },
+            onIdle = { stopService(Intent(this, RequestService::class.java)) })
+    }
+
+    fun restorePendingRequests() { requestScope.launch { requests.restorePending() } }
+
+    fun chatViewModelFactory(invoked: Boolean = false) = viewModelFactory {
+        initializer { OpenAIChatViewModel(chatHistory, settingsRepository, chatClient, requests, invoked) }
     }
 }

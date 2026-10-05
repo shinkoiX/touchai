@@ -14,6 +14,7 @@ import java.util.UUID
 import java.util.Base64
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.JsonObject
 import org.junit.After
 import org.junit.Assert.*
@@ -33,11 +34,12 @@ class ChatFlowInstrumentedTest {
     private var configuration: OpenAIModelConfig? = null
     private val custom = AiConfiguration(OpenAIModelConfig(apiKey = "test-only", model = "custom-model", webSearch = false))
 
-    private fun setup() {
+    private fun setup(attachScreenshots: Boolean = true) {
         var settings = AppSettings(
             api = OpenAIModelConfig(apiKey = "test-only", model = "default-model"),
             presets = listOf(PromptPreset("custom", "Custom", "Explain this image", custom)),
             lastPresetId = "custom", imageQuality = ImageQuality.Original,
+            quickAccess = QuickAccessSettings(attachScreenshotAutomatically = attachScreenshots),
         )
         val repository = object : SettingsRepository {
             override suspend fun load() = settings
@@ -49,12 +51,75 @@ class ChatFlowInstrumentedTest {
                 request = value; configuration = config
             }
         }
-        compose.runOnUiThread { viewModel = OpenAIChatViewModel(history, repository, client); store.put("test", viewModel) }
+        compose.runOnUiThread { viewModel = testChatViewModel(history, repository, client); store.put("test", viewModel) }
         compose.setContent { TouchAiTheme { OpenAIChatScreen(viewModel, (compose.activity.application as TouchAiApplication).quickAccess) } }
         compose.waitUntil(5_000) { viewModel.uiState.value.ready }
     }
 
     @After fun cleanup() { compose.runOnUiThread { store.clear() }; events.close(); historyDirectory.deleteRecursively() }
+
+    @Test fun generatedImageOnlyReplyIsVisibleAndSurvivesHistoryReopening() {
+        setup()
+        val image = runBlocking {
+            ImageProcessor.prepare(Bitmap.createBitmap(120, 80, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) },
+                ImageCrop.Full, ImageQuality.Original).input
+        }
+        compose.onNode(hasSetTextAction()).performTextReplacement("Draw an image")
+        compose.onNodeWithContentDescription("Send").performClick()
+        compose.waitUntil(5_000) { request != null }
+        events.trySend(OpenAIStreamEvent.ImageGenerated(GeneratedImage("test-image", image)))
+        events.trySend(OpenAIStreamEvent.Completed(JsonObject(emptyMap())))
+        events.close()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
+        compose.waitUntil(5_000) { compose.onAllNodesWithContentDescription("Generated image").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithContentDescription("Generated image").performClick()
+        compose.onNodeWithContentDescription("Generated image preview").assertExists()
+        compose.onNodeWithContentDescription("Close image").performClick()
+        compose.onNodeWithContentDescription("New chat").performClick()
+        compose.waitUntil(5_000) { viewModel.uiState.value.ready }
+        compose.onNodeWithContentDescription("Chat history").performClick()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.historyLoading }
+        compose.onNodeWithText("Draw an image").performClick()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.historyOpen }
+        compose.waitUntil(5_000) { compose.onAllNodesWithContentDescription("Generated image").fetchSemanticsNodes().isNotEmpty() }
+        assertEquals(image, viewModel.uiState.value.turns.single().generatedImages.single().image)
+    }
+
+    @Test fun screenshotCanBeAddedRemovedAndAddedAgainWithoutRecapturing() {
+        setup(attachScreenshots = false)
+        val bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+        var captures = 0
+        compose.runOnUiThread { viewModel.captureOnInvocation { captures++; bitmap } }
+        compose.waitUntil(5_000) { viewModel.uiState.value.image != null && !viewModel.uiState.value.invoking }
+        assertFalse(viewModel.uiState.value.imageAttached)
+        compose.onNodeWithContentDescription("Crop image").assertExists()
+        compose.onNodeWithContentDescription("Add image").assertIsNotSelected().performClick()
+        compose.onNodeWithContentDescription("Remove image").assertIsSelected()
+        assertSame(bitmap, viewModel.uiState.value.originalImage)
+        compose.onNodeWithContentDescription("Remove image").performClick()
+        assertFalse(viewModel.uiState.value.imageAttached)
+        compose.onNodeWithContentDescription("Crop image").assertExists()
+        assertSame(bitmap, viewModel.uiState.value.capturedScreenshot)
+        compose.onNodeWithContentDescription("Add image").assertIsNotSelected().performClick()
+        assertTrue(viewModel.uiState.value.imageAttached)
+        assertEquals(1, captures)
+        compose.runOnUiThread { viewModel.newChat() }
+        compose.waitUntil(5_000) { viewModel.uiState.value.ready }
+        assertNull(viewModel.uiState.value.capturedScreenshot)
+    }
+
+    @Test fun manualScreenshotModeDoesNotIncludeAnUnattachedCaptureInRequests() {
+        setup(attachScreenshots = false)
+        compose.runOnUiThread { viewModel.captureOnInvocation { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) } }
+        compose.waitUntil(5_000) { viewModel.uiState.value.image != null && !viewModel.uiState.value.invoking }
+        compose.onNode(hasSetTextAction()).performTextReplacement("Only text")
+        compose.onNodeWithContentDescription("Send").performClick()
+        compose.waitUntil(5_000) { request != null }
+        assertTrue(request!!.messages.last().images.isEmpty())
+        assertNull(viewModel.uiState.value.capturedScreenshot)
+        compose.runOnUiThread { viewModel.cancel() }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
+    }
 
     @Test fun cropPresetAndStreamingWorkTogether() {
         setup()

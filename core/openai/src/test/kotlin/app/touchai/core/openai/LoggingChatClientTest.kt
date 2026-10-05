@@ -24,7 +24,7 @@ class LoggingChatClientTest {
     private val request = OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Explain the heading",
         listOf(OpenAIImage("data:image/png;base64,secret-image-bytes")))), "Be concise")
 
-    @Test fun completionRecordsMessagesAndMetricsWithoutCredentialsImagesOrResponseBody() = runTest {
+    @Test fun completionRecordsFullOutputWithoutCredentialsOrInputImageBytes() = runTest {
         val sink = Sink()
         val events = listOf(OpenAIStreamEvent.TextDelta("Private answer"), OpenAIStreamEvent.Completed(buildJsonObject { put("providerSecret", "hidden-response") }))
         val logged = LoggingChatClient(client { flow { events.forEach { emit(it) } } }, sink)
@@ -40,10 +40,12 @@ class LoggingChatClientTest {
         val json = result.json().toString()
         assertTrue(json.contains("Explain the heading"))
         assertTrue(json.contains("Be concise"))
-        listOf("secret-api-key", "secret-image-bytes", "data:image", "Private answer", "hidden-response", "Authorization").forEach { assertFalse(json.contains(it)) }
+        assertEquals("Private answer", result.data.getValue("output").jsonObject.getValue("text").jsonPrimitive.content)
+        assertTrue(json.contains("hidden-response"))
+        listOf("secret-api-key", "secret-image-bytes", "data:image", "Authorization").forEach { assertFalse(json.contains(it)) }
     }
 
-    @Test fun failureLogsStatusButNeverRawProviderError() = runTest {
+    @Test fun failureRecordsProviderErrorWithTheApiKeyRedacted() = runTest {
         val sink = Sink()
         val error = OpenAIRequestException("Echoed secret-api-key and secret-image-bytes", 401)
         val logged = LoggingChatClient(client { flow { throw error } }, sink)
@@ -52,7 +54,7 @@ class LoggingChatClientTest {
         val result = sink.finishes.single()
         assertEquals("Failed", result.status)
         assertEquals(401, result.data.getValue("httpStatus").jsonPrimitive.int)
-        assertFalse(result.json().toString().contains("Echoed"))
+        assertTrue(result.json().toString().contains("Echoed [REDACTED]"))
         assertFalse(result.json().toString().contains("secret-api-key"))
     }
 
@@ -72,14 +74,40 @@ class LoggingChatClientTest {
         assertEquals("Retry", sink.finishes.last().data.getValue("purpose").jsonPrimitive.content)
     }
 
-    @Test fun stopPersistsCancelledEvenThoughCollectorIsCancelled() = runTest {
+    @Test fun lifecycleCancellationIsRecordedAsInterrupted() = runTest {
         val sink = Sink()
         val logged = LoggingChatClient(client { flow { emit(OpenAIStreamEvent.TextDelta("Partial")); awaitCancellation() } }, sink)
         val job = launch { logged.stream(config, request).toList() }
         runCurrent()
         job.cancelAndJoin()
-        assertEquals("Cancelled", sink.finishes.single().status)
+        assertEquals("Interrupted", sink.finishes.single().status)
         assertEquals(7, sink.finishes.single().data.getValue("outputCharacters").jsonPrimitive.int)
+        assertEquals("Partial", sink.finishes.single().data.getValue("output").jsonObject.getValue("text").jsonPrimitive.content)
+    }
+
+    @Test fun imagePayloadsAndUnknownEventsArePreservedWithNestedCredentialsRedacted() = runTest {
+        val sink = Sink()
+        val raw = buildJsonObject {
+            put("type", "provider.event"); put("result", "image-result")
+            putJsonObject("headers") { put("Authorization", "Bearer secret-api-key"); put("api_key", "another-secret") }
+            put("message", "Echo secret-api-key")
+        }
+        val image = GeneratedImage("output-one", OpenAIImage("data:image/png;base64,aW1hZ2U="))
+        val logged = LoggingChatClient(client { flow {
+            emit(OpenAIStreamEvent.ResponsePayload(raw))
+            emit(OpenAIStreamEvent.ImageGenerated(image))
+            emit(OpenAIStreamEvent.Completed(raw))
+        } }, sink)
+        logged.stream(config, request).toList()
+        val result = sink.finishes.single()
+        assertEquals(1, result.data.getValue("outputImageCount").jsonPrimitive.int)
+        val output = result.data.getValue("output").jsonObject
+        assertEquals(image.image.url, output.getValue("images").jsonArray.single().jsonObject.getValue("url").jsonPrimitive.content)
+        assertEquals(1, output.getValue("events").jsonArray.size)
+        assertTrue(output.toString().contains("provider.event"))
+        assertTrue(output.toString().contains("image-result"))
+        assertFalse(output.toString().contains("secret-api-key"))
+        assertFalse(output.toString().contains("another-secret"))
     }
 
     @Test fun loggingContextIsNotSentToProvider() {
