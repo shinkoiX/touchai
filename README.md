@@ -141,7 +141,9 @@ an untracked `local.properties` file.
 
 The Android workflow runs unit tests, lint, and debug builds on pushes and pull
 requests. Pushes to the default branch, `v*` tags, and manual runs also produce a
-signed release APK after the checks pass. Download APKs from the run's artifacts.
+signed release APK after the checks pass. A `v*` tag also publishes a GitHub Release
+with generated notes and the signed `touchai-<tag>.apk` attached. Branch builds stay
+available in the run's artifacts.
 Debug icons are red; release icons remain purple.
 
 Release signing uses these repository Actions secrets:
