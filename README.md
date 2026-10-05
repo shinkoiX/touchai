@@ -137,6 +137,34 @@ an untracked `local.properties` file.
 ./gradlew testDebugUnitTest assembleDebug assembleDebugAndroidTest lintDebug
 ```
 
+## GitHub Actions and release signing
+
+The Android workflow runs unit tests, lint, and debug builds on pushes and pull
+requests. Pushes to the default branch, `v*` tags, and manual runs also produce a
+signed release APK after the checks pass. Download APKs from the run's artifacts.
+Debug icons are red; release icons remain purple.
+
+Release signing uses these repository Actions secrets:
+
+- `ANDROID_KEYSTORE_BASE64`: the Base64-encoded release keystore.
+- `ANDROID_KEYSTORE_PASSWORD`: the keystore password.
+- `ANDROID_KEY_ALIAS`: the signing key alias.
+- `ANDROID_KEY_PASSWORD`: the signing key password.
+
+The signing key is restored only for the release job, never for pull-request checks.
+Signing builds disable the Gradle configuration cache, and the temporary keystore
+is removed after the job. Keep the ignored `.signing` directory backed up securely;
+its key is required to sign future updates.
+
+To build a signed release locally from the repository root:
+
+```sh
+. .signing/release.env
+./gradlew --no-configuration-cache :app:assembleRelease
+```
+
+## Device checks
+
 For device tests without the Gradle runner's install/uninstall cleanup, install the
 APKs and invoke instrumentation directly on a test device:
 
