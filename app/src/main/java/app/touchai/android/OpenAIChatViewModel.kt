@@ -1,0 +1,302 @@
+package app.touchai.android
+
+import android.graphics.Bitmap
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import app.touchai.core.openai.*
+import java.net.URI
+import java.net.URISyntaxException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+
+enum class TurnStatus { Streaming, Completed, Stopped, Incomplete, Failed }
+
+data class ChatTurn(
+    val user: ChatMessage,
+    val ai: AiConfiguration,
+    val presetName: String? = null,
+    val answer: String = "",
+    val status: TurnStatus = TurnStatus.Streaming,
+    val error: String? = null,
+    val searchStatus: String? = null,
+    val citations: List<WebCitation> = emptyList(),
+)
+
+data class OpenAIChatUiState(
+    val settings: AppSettings = AppSettings(),
+    val ready: Boolean = false,
+    val settingsOpen: Boolean = false,
+    val logsOpen: Boolean = false,
+    val settingsDraft: AppSettings? = null,
+    val savingSettings: Boolean = false,
+    val testingConnection: Boolean = false,
+    val connectionResult: String? = null,
+    val invoking: Boolean = false,
+    val originalImage: Bitmap? = null,
+    val imageCrop: ImageCrop = ImageCrop.Full,
+    val cropping: Boolean = false,
+    val preparingImage: Boolean = false,
+    val prompt: String = "",
+    val image: OpenAIImage? = null,
+    val imagePreview: Bitmap? = null,
+    val selectedPreset: String? = null,
+    val turns: List<ChatTurn> = emptyList(),
+    val error: String? = null,
+) {
+    val isStreaming: Boolean get() = turns.lastOrNull()?.status == TurnStatus.Streaming
+    val selectedAi: AiConfiguration get() = settings.aiFor(selectedPreset)
+}
+
+class OpenAIChatViewModel(
+    private val repository: SettingsRepository,
+    private val client: ChatClient,
+    private val closeClient: () -> Unit = {},
+    invoked: Boolean = false,
+) : ViewModel() {
+    private val _uiState = MutableStateFlow(OpenAIChatUiState(invoking = invoked))
+    val uiState = _uiState.asStateFlow()
+    private var streamJob: Job? = null
+    private var imageJob: Job? = null
+    private var captureJob: Job? = null
+    private var captureRequested = false
+    private var presetSaveJob: Job? = null
+
+    init { loadSettings() }
+
+    fun loadSettings() {
+        viewModelScope.launch {
+            try {
+                presetSaveJob?.join()
+                val settings = repository.load()
+                update { it.copy(settings = settings, ready = true, error = null,
+                    settingsDraft = if (it.settingsOpen && it.settingsDraft == it.settings) settings else it.settingsDraft,
+                    selectedPreset = if (!it.ready) rememberedPreset(settings) else it.selectedPreset,
+                    prompt = if (!it.ready) presetText(settings, rememberedPreset(settings)) else it.prompt) }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { reportError("Could not load settings: ${error.message}") }
+        }
+    }
+
+    fun setPrompt(value: String) = update { it.copy(prompt = value) }
+    fun setImage(value: OpenAIImage?) = update { it.copy(image = value, imagePreview = null, error = null) }
+    fun selectPreset(id: String?) {
+        update { it.copy(selectedPreset = id, prompt = presetText(it.settings, id), settings = it.settings.copy(lastPresetId = id)) }
+        presetSaveJob?.cancel()
+        presetSaveJob = viewModelScope.launch {
+            try { repository.rememberPreset(id) }
+            catch (error: CancellationException) { throw error }
+            catch (error: Exception) { reportError("Could not remember preset: ${error.message}") }
+        }
+    }
+    fun reportError(message: String) = update { it.copy(error = message) }
+    fun showSettings(open: Boolean) = update { it.copy(settingsOpen = open,
+        settingsDraft = if (open) it.settings else null, error = null, connectionResult = null) }
+    fun showLogs(open: Boolean) = update { it.copy(logsOpen = open) }
+    fun editSettings(value: AppSettings) = update { it.copy(settingsDraft = value, error = null, connectionResult = null) }
+
+    fun prepareInvocation() {
+        if (captureJob?.isActive == true) return
+        captureRequested = false
+        update { it.copy(invoking = true, settingsOpen = false, logsOpen = false, settingsDraft = null) }
+    }
+
+    fun captureOnInvocation(capture: suspend () -> Bitmap) {
+        if (captureJob?.isActive == true || captureRequested) return
+        captureRequested = true
+        update { it.copy(invoking = true, settingsOpen = false, logsOpen = false, settingsDraft = null) }
+        captureJob = viewModelScope.launch {
+            streamJob?.cancelAndJoin()
+            imageJob?.cancelAndJoin()
+            update { it.copy(turns = emptyList(), image = null, imagePreview = null, originalImage = null,
+                cropping = false, preparingImage = false, error = null) }
+            try {
+                val bitmap = capture()
+                presetSaveJob?.join()
+                val settings = repository.load()
+                update { it.copy(settings = settings, ready = true, selectedPreset = rememberedPreset(settings),
+                    prompt = presetText(settings, rememberedPreset(settings)), invoking = false) }
+                attachImage(bitmap)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { update { it.copy(invoking = false, error = error.message ?: "Screen capture failed. Continue without an image.") } }
+        }
+    }
+
+    fun attachImage(bitmap: Bitmap) {
+        imageJob?.cancel()
+        update { it.copy(originalImage = bitmap, imagePreview = bitmap, image = null, imageCrop = ImageCrop.Full,
+            cropping = false, error = null) }
+        prepareImage(bitmap, ImageCrop.Full)
+    }
+
+    fun openCrop() { update { it.copy(cropping = it.originalImage != null) } }
+    fun closeCrop() { update { it.copy(cropping = false) } }
+
+    fun applyCrop(crop: ImageCrop) {
+        val original = _uiState.value.originalImage ?: return
+        update { it.copy(cropping = false, imageCrop = crop) }
+        prepareImage(original, crop)
+    }
+
+    private fun prepareImage(original: Bitmap, crop: ImageCrop) {
+        imageJob?.cancel()
+        val quality = _uiState.value.settings.imageQuality
+        update { it.copy(preparingImage = true, image = null, error = null) }
+        imageJob = viewModelScope.launch {
+            try {
+                val prepared = ImageProcessor.prepare(original, crop, quality)
+                update { it.copy(image = prepared.input, imagePreview = prepared.preview, preparingImage = false) }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                kotlinx.coroutines.currentCoroutineContext().ensureActive()
+                update { it.copy(preparingImage = false, error = "Could not prepare image: ${error.message}") }
+            }
+        }
+    }
+
+    fun removeImage() {
+        imageJob?.cancel()
+        update { it.copy(originalImage = null, image = null, imagePreview = null, imageCrop = ImageCrop.Full,
+            cropping = false, preparingImage = false, error = null) }
+    }
+
+    fun saveSettings(settings: AppSettings) {
+        if (_uiState.value.isStreaming || _uiState.value.savingSettings) return
+        val normalized = settings.copy(
+            api = settings.api.normalized(),
+            presets = settings.presets.map { preset -> preset.copy(name = preset.name.trim(),
+                customAi = preset.customAi?.let { it.copy(api = it.api.normalized()) }) },
+            lastPresetId = settings.lastPresetId?.takeIf { id -> settings.presets.any { it.id == id } },
+        )
+        val error = settingsError(normalized)
+        if (error != null) { reportError(error); return }
+        update { it.copy(savingSettings = true, error = null) }
+        viewModelScope.launch {
+            try {
+                repository.save(normalized)
+                val saved = repository.load()
+                val before = _uiState.value
+                update { current ->
+                    val selected = current.selectedPreset?.takeIf { id -> saved.presets.any { it.id == id } }
+                    current.copy(settings = saved, ready = true, settingsOpen = false, settingsDraft = null,
+                        turns = if (saved == current.settings) current.turns else emptyList(), selectedPreset = selected,
+                        prompt = if (current.prompt == presetText(current.settings, current.selectedPreset)) presetText(saved, selected) else current.prompt)
+                }
+                if (saved.imageQuality != before.settings.imageQuality) {
+                    before.originalImage?.let { prepareImage(it, before.imageCrop) }
+                }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { reportError("Could not save settings: ${error.message}") }
+            finally { update { it.copy(savingSettings = false) } }
+        }
+    }
+
+    fun testConnection(configuration: AiConfiguration, label: String) {
+        if (_uiState.value.testingConnection) return
+        val ai = configuration.copy(api = configuration.api.normalized())
+        val error = apiError(ai.api, requireCredentials = true)
+        if (error != null) { reportError(error); return }
+        update { it.copy(testingConnection = true, connectionResult = null, error = null) }
+        viewModelScope.launch {
+            try {
+                client.stream(ai.api, OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Reply with OK only. This is a connection test.")), ai.instructions, RequestPurpose.ConnectionTest, label)).collect { }
+                update { it.copy(connectionResult = "$label: connection and streaming succeeded.") }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { reportError("$label: ${error.message}") }
+            finally { update { it.copy(testingConnection = false) } }
+        }
+    }
+
+    fun submit() {
+        val snapshot = _uiState.value
+        if (!snapshot.ready || snapshot.isStreaming || snapshot.savingSettings || snapshot.preparingImage || snapshot.cropping || (snapshot.originalImage != null && snapshot.image == null)) return
+        val ai = snapshot.selectedAi
+        val error = apiError(ai.api, requireCredentials = true)
+        if (error != null) { update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = error) }; return }
+        val preset = snapshot.settings.presets.find { it.id == snapshot.selectedPreset }
+        val prompt = snapshot.prompt.trim()
+        if (prompt.isBlank() && snapshot.image == null) { reportError("Enter a message, choose a preset, or attach an image."); return }
+        val user = ChatMessage(MessageRole.User, prompt, listOfNotNull(snapshot.image))
+        update { it.copy(prompt = "", image = null, imagePreview = null, originalImage = null, imageCrop = ImageCrop.Full, error = null,
+            turns = it.turns + ChatTurn(user, ai, preset?.name)) }
+        startRequest()
+    }
+
+    fun retry() {
+        val snapshot = _uiState.value
+        if (snapshot.isStreaming || snapshot.turns.isEmpty() || snapshot.savingSettings) return
+        updateLast { it.copy(answer = "", status = TurnStatus.Streaming, error = null, searchStatus = null, citations = emptyList()) }
+        startRequest(RequestPurpose.Retry)
+    }
+
+    private fun startRequest(purpose: RequestPurpose = RequestPurpose.Chat) {
+        val snapshot = _uiState.value
+        val turn = snapshot.turns.last()
+        val messages = snapshot.turns.dropLast(1).filter { it.status == TurnStatus.Completed }.flatMap {
+            listOf(it.user, ChatMessage(MessageRole.Assistant, it.answer))
+        } + turn.user
+        streamJob = viewModelScope.launch {
+            val buffer = StreamingTextBuffer(this) { delta -> updateLast { it.copy(answer = it.answer + delta) } }
+            try {
+                client.stream(turn.ai.api, OpenAIRequest(messages, turn.ai.instructions, purpose, turn.presetName)).collect { event ->
+                    when (event) {
+                        is OpenAIStreamEvent.TextDelta -> buffer.append(event.text)
+                        is OpenAIStreamEvent.Completed -> buffer.flush()
+                        is OpenAIStreamEvent.SearchStatus -> updateLast { it.copy(searchStatus = event.status) }
+                        is OpenAIStreamEvent.Citation -> updateLast { it.copy(citations = (it.citations + event.source).distinct()) }
+                    }
+                }
+                updateLast { it.copy(status = TurnStatus.Completed) }
+            } catch (error: CancellationException) {
+                buffer.flush(); updateLast { it.copy(status = TurnStatus.Stopped) }; throw error
+            } catch (error: IncompleteResponseException) {
+                buffer.flush(); updateLast { it.copy(status = TurnStatus.Incomplete, error = error.message) }
+            } catch (error: Exception) {
+                buffer.flush(); updateLast { it.copy(status = TurnStatus.Failed, error = error.message ?: "Request failed.") }
+            } finally { buffer.flush() }
+        }
+    }
+
+    fun cancel() { streamJob?.cancel() }
+    fun newChat() {
+        if (_uiState.value.isStreaming || _uiState.value.preparingImage) return
+        update { it.copy(ready = false, turns = emptyList(), prompt = "", image = null, imagePreview = null,
+            originalImage = null, imageCrop = ImageCrop.Full, cropping = false, error = null) }
+        loadSettings()
+    }
+
+    override fun onCleared() { closeClient(); super.onCleared() }
+    private fun updateLast(transform: (ChatTurn) -> ChatTurn) = update { it.copy(turns = it.turns.dropLast(1) + transform(it.turns.last())) }
+    private fun update(transform: (OpenAIChatUiState) -> OpenAIChatUiState) { _uiState.update(transform) }
+    private fun rememberedPreset(settings: AppSettings) = settings.lastPresetId?.takeIf { id -> settings.presets.any { it.id == id } }
+    private fun presetText(settings: AppSettings, id: String?) = settings.presets.find { it.id == id }?.prompt.orEmpty()
+}
+
+private fun OpenAIModelConfig.normalized() = copy(baseUrl = baseUrl.trim().trimEnd('/'), apiKey = apiKey.trim(), model = model.trim(),
+    reasoningEffort = reasoningEffort?.trim()?.takeIf(String::isNotEmpty))
+
+internal fun settingsError(settings: AppSettings): String? {
+    apiError(settings.api, requireCredentials = false)?.let { return "Default AI: $it" }
+    settings.presets.forEach { preset ->
+        if (preset.name.isBlank() || preset.prompt.isBlank()) return "Each preset needs a name and prompt."
+        preset.customAi?.let { ai -> apiError(ai.api, requireCredentials = false)?.let { return "${preset.name}: $it" } }
+    }
+    return null
+}
+
+internal fun apiError(api: OpenAIModelConfig, requireCredentials: Boolean): String? {
+    val uri = try { URI(api.baseUrl) } catch (_: URISyntaxException) { return "Enter a valid API base URL." }
+    return when {
+        uri.scheme != "https" || uri.host.isNullOrBlank() -> "Use an HTTPS API base URL, including its version path."
+        uri.userInfo != null || uri.query != null || uri.fragment != null -> "The base URL must not contain credentials, a query, or a fragment."
+        uri.path.endsWith("/responses") || uri.path.endsWith("/chat/completions") -> "Enter the base URL only; the selected API protocol adds the endpoint path."
+        requireCredentials && api.apiKey.isBlank() -> "Enter the API key for this configuration in Settings."
+        requireCredentials && api.model.isBlank() -> "Enter a model ID for this configuration in Settings."
+        else -> null
+    }
+}
