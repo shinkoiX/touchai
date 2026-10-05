@@ -48,10 +48,22 @@ and replaces the editable message text with that preset’s prompt. Send uses th
 textbox exactly once; it does not append a hidden copy of the preset.
 
 Each invocation starts a fresh conversation. Settings changes also start a new
-conversation. Conversations and screenshots stay in memory, survive activity
-rotation, and are released when the conversation is cleared or the process ends.
-There is no persistent chat archive, but outgoing text is retained in local request
-logs as described below.
+conversation. Sent conversations are saved locally, including their attached images,
+answers, citations, and AI configuration. Use **Chat history** in the chat toolbar to
+reopen and continue a conversation or delete it. **New chat** keeps previous chats in
+history. Images appear inside sent messages; tap one to open a larger preview.
+Unsent drafts and attachments remain in memory only.
+
+In **Chat history → ⋮**, use **Export history** to save all chats and attached images
+as a JSON file through Android's file picker. **Import history** reads that file and
+adds independent copies without replacing existing chats. API keys are excluded.
+Retrying an imported turn uses a key from current settings only when the endpoint
+and API protocol match; configure that endpoint first if no matching key is available.
+
+History is saved when a request starts and when it completes, fails, or is stopped.
+If Android terminates the process during a request, the saved turn reopens as stopped;
+the unfinished response may not be retained. Retry uses that turn's saved AI
+configuration; new follow-ups use the currently selected preset and current settings.
 
 ## AI configuration and web search
 
@@ -79,16 +91,21 @@ small real request using the configuration being tested.
 
 The accessibility service hosts the button and uses `takeScreenshot()` only after
 an explicit invocation. A transparent entry activity preserves the underlying app
-until capture finishes. Notification captures wait for the covering system window
-to disappear. The service reads window types and bounds for that readiness check;
+until capture finishes. Notification captures request shade dismissal on Android 12
+and later, then wait for covering system windows to stay absent while the closing
+animation and blur settle. The delay defaults to 200 ms and can be adjusted from
+0–1000 ms in **Settings → Quick access → Notification capture delay**.
+The service reads window types and bounds for that readiness check;
 it does not inspect app view hierarchies or perform actions inside other apps.
 Protected screens can block or blank screenshots; text-only conversation remains
 available. Capture stops safely when access is unavailable or revoked.
 
 Settings and presets use DataStore. All API keys, including preset-specific keys,
 are encrypted with AES-GCM using Android Keystore. App files and the log database
-are excluded from cloud backup and device transfer. The app does not write
-screenshots or prepared images to disk.
+are excluded from cloud backup and device transfer. Sent images are stored with
+their chats in private app files; deleting a chat removes its saved images and
+messages. API keys in saved chat configurations are encrypted with the same Keystore
+protection. Unsent screenshots and prepared images are not written to disk.
 
 **Settings → Request logs** records every dispatched chat request, retry, and
 connection test. Logs include sent message text (including conversation context),
@@ -126,7 +143,9 @@ Tests cover both API schemas, web-search options, citations, fragmented Unicode 
 completion/error handling, cancellation, request context and retry, per-preset AI
 selection, encrypted persistence, crop geometry, actual cropped image encoding,
 Android Keystore, remembered/editable presets, direct attachment → crop → streaming,
-request log sanitization and outcomes, durable log storage, and the log viewer. They use local
+request log sanitization and outcomes, durable log storage, the log viewer, chat history
+round-trips and deletion, portable history export/import, continued image context,
+and sent-image previews. They use local
 mock responses and do not call paid AI endpoints.
 
 Manual device checks cover the floating button, dragging, clean captures from both

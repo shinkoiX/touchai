@@ -8,6 +8,7 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.view.Choreographer
 import android.view.Display
 import android.view.Gravity
@@ -25,8 +26,6 @@ import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.suspendCancellableCoroutine
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withTimeoutOrNull
 
 class ScreenCaptureService : AccessibilityService() {
     private val runtime get() = (application as TouchAiApplication).quickAccess
@@ -139,10 +138,8 @@ class ScreenCaptureService : AccessibilityService() {
         bubble?.visibility = View.GONE
         try {
             if (waitForNotificationShade) {
-                val cleared = withTimeoutOrNull(3_000) {
-                    while (hasCoveringSystemWindow()) delay(32)
-                    true
-                } ?: false
+                if (Build.VERSION.SDK_INT >= 31) performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
+                val cleared = awaitNotificationShadeDismissal(options.notificationCaptureDelayMillis, ::hasCoveringSystemWindow)
                 if (!cleared) throw ScreenCaptureException("The notification panel is still open. Close it and try again, or continue without an image.")
             }
             // Allow the transparent entry activity and hidden bubble to reach the display compositor.
@@ -172,12 +169,14 @@ class ScreenCaptureService : AccessibilityService() {
     }
 
     private fun hasCoveringSystemWindow(): Boolean {
-        val screen = windowManager.maximumWindowMetrics.bounds
+        val metrics = windowManager.maximumWindowMetrics
+        val screen = metrics.bounds
+        val insets = metrics.windowInsets.getInsetsIgnoringVisibility(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
         val bounds = android.graphics.Rect()
         return windows.any { window ->
             if (window.type != AccessibilityWindowInfo.TYPE_SYSTEM) false else {
                 window.getBoundsInScreen(bounds)
-                bounds.width() > screen.width() * 0.8f && bounds.height() > screen.height() * 0.5f
+                bounds.width() > screen.width() * 0.8f && bounds.height() > insets.top + insets.bottom
             }
         }
     }

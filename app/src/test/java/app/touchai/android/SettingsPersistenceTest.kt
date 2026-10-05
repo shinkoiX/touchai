@@ -25,12 +25,13 @@ class SettingsPersistenceTest {
             presets = listOf(PromptPreset("test", "Explain", "Explain this image", AiConfiguration(
                 OpenAIModelConfig(apiKey = "another-preset-secret", model = "another-model", baseUrl = "https://preset.example.com/v1", webSearch = false), "Preset instructions"))),
             lastPresetId = "test", imageQuality = ImageQuality.Original,
-            quickAccess = QuickAccessSettings(floatingButton = false),
+            quickAccess = QuickAccessSettings(floatingButton = false, notificationCaptureDelayMillis = 650),
         )
         val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
             val store = PreferenceDataStoreFactory.create(scope = firstScope) { file }
             val repository = DataStoreSettingsRepository(store, cipher)
+            assertEquals(200, repository.load().quickAccess.notificationCaptureDelayMillis)
             repository.save(settings)
             repository.rememberPreset("test")
             assertEquals(settings, repository.load())

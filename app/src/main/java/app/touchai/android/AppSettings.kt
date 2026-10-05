@@ -20,6 +20,7 @@ data class QuickAccessSettings(
     val notification: Boolean = true,
     val buttonOnRight: Boolean = true,
     val buttonY: Float = 0.35f,
+    val notificationCaptureDelayMillis: Int = 200,
 )
 
 data class AppSettings(

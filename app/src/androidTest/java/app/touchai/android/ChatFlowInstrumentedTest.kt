@@ -9,6 +9,8 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.ViewModelStore
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import app.touchai.core.openai.*
+import java.io.File
+import java.util.UUID
 import java.util.Base64
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.receiveAsFlow
@@ -23,6 +25,8 @@ import org.junit.runner.RunWith
 class ChatFlowInstrumentedTest {
     @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
     private val store = ViewModelStore()
+    private val historyDirectory by lazy { File(compose.activity.cacheDir, "test-chats-${UUID.randomUUID()}") }
+    private val history by lazy { ChatHistoryStore(historyDirectory, ApiKeyCipher()) }
     private lateinit var viewModel: OpenAIChatViewModel
     private val events = Channel<OpenAIStreamEvent>(Channel.UNLIMITED)
     private var request: OpenAIRequest? = null
@@ -45,12 +49,12 @@ class ChatFlowInstrumentedTest {
                 request = value; configuration = config
             }
         }
-        compose.runOnUiThread { viewModel = OpenAIChatViewModel(repository, client); store.put("test", viewModel) }
+        compose.runOnUiThread { viewModel = OpenAIChatViewModel(history, repository, client); store.put("test", viewModel) }
         compose.setContent { TouchAiTheme { OpenAIChatScreen(viewModel, (compose.activity.application as TouchAiApplication).quickAccess) } }
         compose.waitUntil(5_000) { viewModel.uiState.value.ready }
     }
 
-    @After fun cleanup() { compose.runOnUiThread { store.clear() }; events.close() }
+    @After fun cleanup() { compose.runOnUiThread { store.clear() }; events.close(); historyDirectory.deleteRecursively() }
 
     @Test fun cropPresetAndStreamingWorkTogether() {
         setup()
@@ -66,6 +70,9 @@ class ChatFlowInstrumentedTest {
         compose.onNodeWithText("Custom", useUnmergedTree = true).performClick()
         compose.onNodeWithContentDescription("Send").performClick()
         compose.waitUntil(5_000) { request != null }
+        compose.onNodeWithContentDescription("Attached image").assertExists().performClick()
+        compose.onNodeWithContentDescription("Attached image preview").assertExists()
+        compose.onNodeWithContentDescription("Close image").performClick()
         assertEquals(custom.api, configuration)
         val bytes = Base64.getDecoder().decode(request!!.messages.last().images.single().url.substringAfter(','))
         val image = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
@@ -79,6 +86,14 @@ class ChatFlowInstrumentedTest {
         compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
         compose.onNodeWithText("Stopped").assertExists()
         assertEquals("Visible before completion", viewModel.uiState.value.turns.last().answer)
+        compose.onNodeWithContentDescription("New chat").performClick()
+        compose.waitUntil(5_000) { viewModel.uiState.value.ready }
+        compose.onNodeWithContentDescription("Chat history").performClick()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.historyLoading }
+        compose.onNodeWithText("Explain this image").performClick()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.historyOpen }
+        compose.onNodeWithContentDescription("Attached image").assertExists()
+        compose.onNodeWithText("Visible before completion", substring = true).assertExists()
     }
 
     @Test fun recroppingUsesOriginalAndCancelKeepsAppliedCrop() {

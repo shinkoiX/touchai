@@ -10,11 +10,13 @@ import app.touchai.core.openai.LoggingChatClient
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
+import java.io.File
 
 class TouchAiApplication : Application() {
     val settingsRepository by lazy { DataStoreSettingsRepository(settingsDataStore, ApiKeyCipher()) }
     val quickAccess by lazy { QuickAccessRuntime(this, settingsRepository) }
     val requestLogs by lazy { RequestLogStore(this) }
+    val chatHistory by lazy { ChatHistoryStore(File(filesDir, "chats"), ApiKeyCipher()) }
 
     override fun onCreate() {
         super.onCreate()
@@ -41,7 +43,7 @@ class TouchAiApplication : Application() {
                 install(HttpTimeout) { connectTimeoutMillis = 15_000; socketTimeoutMillis = 120_000 }
                 engine { config { retryOnConnectionFailure(false) } }
             }
-            OpenAIChatViewModel(settingsRepository, LoggingChatClient(OpenAIModel(client), requestLogs), client::close, invoked)
+            OpenAIChatViewModel(chatHistory, settingsRepository, LoggingChatClient(OpenAIModel(client), requestLogs), client::close, invoked)
         }
     }
 }

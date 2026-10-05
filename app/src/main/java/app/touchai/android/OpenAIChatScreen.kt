@@ -3,6 +3,7 @@ package app.touchai.android
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.graphics.Bitmap
+import java.io.IOException
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
@@ -40,8 +41,11 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.touchai.core.markdown.StreamingMarkdown
+import app.touchai.core.openai.OpenAIImage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -55,6 +59,16 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
     val compactKeyboard = compact && WindowInsets.ime.getBottom(LocalDensity.current) > 0
     val scope = rememberCoroutineScope()
     var loadingImage by remember { mutableStateOf(false) }
+    val exportHistory = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) viewModel.exportHistory {
+            context.contentResolver.openOutputStream(uri, "wt") ?: throw IOException("The export file cannot be opened.")
+        }
+    }
+    val importHistory = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) viewModel.importHistory {
+            context.contentResolver.openInputStream(uri) ?: throw IOException("The history file cannot be opened.")
+        }
+    }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) scope.launch {
             loadingImage = true
@@ -67,6 +81,13 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
 
     if (state.logsOpen) {
         RequestLogScreen((context.applicationContext as TouchAiApplication).requestLogs) { viewModel.showLogs(false) }
+        return
+    }
+    if (state.historyOpen) {
+        ChatHistoryScreen(state, viewModel::openChat, viewModel::deleteChat, viewModel::newChat,
+            { viewModel.showHistory(true) }, { exportHistory.launch("touchai-chat-history.json") },
+            { importHistory.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) },
+            { viewModel.showHistory(false) })
         return
     }
     if (state.settingsOpen) {
@@ -106,6 +127,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                 }
             }
             AppIconButton(R.drawable.ic_add, "New chat", viewModel::newChat, enabled = !state.isStreaming && !loadingImage)
+            AppIconButton(R.drawable.ic_history, "Chat history", { keyboard?.hide(); viewModel.showHistory(true) }, enabled = !state.isStreaming && state.ready)
             AppIconButton(R.drawable.ic_settings, "Settings", openSettings, enabled = !state.isStreaming && state.ready)
             onClose?.let { AppIconButton(R.drawable.ic_close, "Close", it) }
         }
@@ -201,11 +223,32 @@ private fun UserMessage(turn: ChatTurn) {
         Surface(color = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
             shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp)) {
             Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (turn.presetName != null || turn.user.images.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (turn.user.images.isNotEmpty()) AppIcon(R.drawable.ic_image, "Image attached", size = 14.dp)
-                    turn.presetName?.let { Text(it, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold) }
-                }
+                turn.presetName?.let { Text(it, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold) }
+                turn.user.images.forEach { SentImage(it) }
                 if (turn.user.text.isNotBlank()) SelectionContainer { Text(turn.user.text, style = MaterialTheme.typography.bodyLarge) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SentImage(image: OpenAIImage) {
+    val preview by produceState<Bitmap?>(null, image) { value = ImageProcessor.decode(image, 1024) }
+    var expanded by remember(image) { mutableStateOf(false) }
+    preview?.let { bitmap ->
+        Image(remember(bitmap) { bitmap.asImageBitmap() }, "Attached image",
+            Modifier.heightIn(max = 240.dp).widthIn(max = 280.dp).clip(MaterialTheme.shapes.medium)
+                .clickable { expanded = true }, contentScale = ContentScale.Fit)
+    }
+    if (expanded) Dialog(onDismissRequest = { expanded = false }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        val fullImage by produceState(preview, image) { value = ImageProcessor.decode(image, 4096) }
+        Surface(Modifier.fillMaxSize(), color = Color.Black) {
+            Box(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+                fullImage?.let { bitmap -> Image(remember(bitmap) { bitmap.asImageBitmap() }, "Attached image preview",
+                    Modifier.fillMaxSize().padding(16.dp), contentScale = ContentScale.Fit) }
+                IconButton(onClick = { expanded = false }, modifier = Modifier.align(Alignment.TopEnd)) {
+                    AppIcon(R.drawable.ic_close, "Close image", tint = Color.White)
+                }
             }
         }
     }

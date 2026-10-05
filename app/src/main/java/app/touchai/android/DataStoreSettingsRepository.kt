@@ -73,6 +73,7 @@ class DataStoreSettingsRepository(
             prefs[Quality] = settings.imageQuality.name
             prefs[FloatingButton] = settings.quickAccess.floatingButton
             prefs[Notification] = settings.quickAccess.notification
+            prefs[NotificationCaptureDelay] = settings.quickAccess.notificationCaptureDelayMillis
             // Position is saved independently by dragging the button, not by the settings form.
         }
         Unit
@@ -93,6 +94,7 @@ class DataStoreSettingsRepository(
     private fun readQuickAccess(prefs: Preferences) = QuickAccessSettings(
         prefs[FloatingButton] ?: true, prefs[Notification] ?: true,
         prefs[ButtonOnRight] ?: true, prefs[ButtonY] ?: 0.35f,
+        notificationCaptureDelayMillis = prefs[NotificationCaptureDelay] ?: QuickAccessSettings().notificationCaptureDelayMillis,
     )
 
     private fun encodeAi(configuration: AiConfiguration) = buildJsonObject {
@@ -132,6 +134,7 @@ class DataStoreSettingsRepository(
         val Quality = stringPreferencesKey("image_quality")
         val FloatingButton = booleanPreferencesKey("floating_button")
         val Notification = booleanPreferencesKey("notification")
+        val NotificationCaptureDelay = intPreferencesKey("notification_capture_delay_ms")
         val ButtonOnRight = booleanPreferencesKey("button_on_right")
         val ButtonY = floatPreferencesKey("button_y")
     }

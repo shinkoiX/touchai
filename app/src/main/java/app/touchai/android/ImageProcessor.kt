@@ -16,6 +16,15 @@ import kotlin.math.roundToInt
 data class PreparedImage(val input: OpenAIImage, val preview: Bitmap)
 
 object ImageProcessor {
+    suspend fun decode(image: OpenAIImage, maxEdge: Int): Bitmap = withContext(Dispatchers.Default) {
+        val bytes = Base64.getDecoder().decode(image.url.substringAfter(','))
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+        val options = BitmapFactory.Options().apply { inSampleSize = 1 }
+        while (maxOf(bounds.outWidth, bounds.outHeight) / options.inSampleSize > maxEdge) options.inSampleSize *= 2
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options) ?: throw IOException("The image cannot be decoded.")
+    }
+
     suspend fun prepare(bitmap: Bitmap, crop: ImageCrop, quality: ImageQuality): PreparedImage = withContext(Dispatchers.Default) {
         val area = crop.pixels(bitmap.width, bitmap.height)
         val cropped = Bitmap.createBitmap(bitmap, area.x, area.y, area.width, area.height)

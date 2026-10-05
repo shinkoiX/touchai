@@ -20,6 +20,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.content.ContextCompat
+import kotlin.math.roundToInt
 
 @Composable
 fun QuickAccessSettings(options: QuickAccessSettings, onChange: (QuickAccessSettings) -> Unit, runtime: QuickAccessRuntime) {
@@ -46,6 +47,19 @@ fun QuickAccessSettings(options: QuickAccessSettings, onChange: (QuickAccessSett
         HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = MaterialTheme.colorScheme.outlineVariant)
         SwitchRow("Floating button", options.floatingButton, { onChange(options.copy(floatingButton = it)) })
         SwitchRow("Notification", options.notification, { onChange(options.copy(notification = it)) })
+        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text("Notification capture delay", style = MaterialTheme.typography.bodyMedium)
+                Text("${options.notificationCaptureDelayMillis} ms", style = MaterialTheme.typography.bodyMedium)
+            }
+            Slider(
+                value = options.notificationCaptureDelayMillis.toFloat(),
+                onValueChange = { onChange(options.copy(notificationCaptureDelayMillis = (it / 50).roundToInt() * 50)) },
+                valueRange = 0f..1_000f,
+                steps = 19,
+                enabled = options.notification,
+            )
+        }
         Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             if (!status.notificationsAllowed) TextButton(onClick = {
                 if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)

@@ -13,6 +13,7 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class OpenAIChatViewModelTest {
+    private val history = MemoryChatHistoryRepository()
     private val settings = AppSettings(api = OpenAIModelConfig(apiKey = "test-only-key", model = "test"))
     @Before fun setUp() { Dispatchers.setMain(StandardTestDispatcher()) }
     @After fun tearDown() { Dispatchers.resetMain() }
@@ -27,6 +28,83 @@ class OpenAIChatViewModelTest {
     }
     private val completed = OpenAIStreamEvent.Completed(JsonObject(emptyMap()))
 
+    @Test fun importedChatRetryUsesCredentialsOnlyForAMatchingConfiguredEndpoint() = runTest {
+        val importedTurn = ChatTurn(ChatMessage(MessageRole.User, "Imported message"),
+            AiConfiguration(settings.api.copy(apiKey = "")), answer = "Old answer", status = TurnStatus.Completed)
+        history.save(SavedChat("imported", 1, null, listOf(importedTurn)))
+        var usedKey: String? = null
+        val api = object : ChatClient {
+            override fun stream(config: OpenAIModelConfig, request: OpenAIRequest) = flow { usedKey = config.apiKey; emit(completed) }
+        }
+        val vm = OpenAIChatViewModel(history, Repository(settings), api)
+        runCurrent(); vm.openChat("imported"); advanceUntilIdle()
+        vm.retry(); advanceUntilIdle()
+        assertEquals(settings.api.apiKey, usedKey)
+        history.save(SavedChat("different-endpoint", 2, null, listOf(importedTurn.copy(ai = AiConfiguration(
+            importedTurn.ai.api.copy(baseUrl = "https://different.example.com/v1"))))))
+        usedKey = null
+        vm.openChat("different-endpoint"); advanceUntilIdle()
+        vm.retry(); advanceUntilIdle()
+        assertNull(usedKey)
+        assertTrue(vm.uiState.value.error!!.contains("API key"))
+        assertEquals("Old answer", vm.uiState.value.turns.single().answer)
+    }
+
+    @Test fun cancelledHistoryLoadDoesNotClearTheNextLoadsBusyState() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        val delayedHistory = object : ChatHistoryRepository by history {
+            override suspend fun list(): List<ChatHistoryEntry> { gate.await(); return emptyList() }
+        }
+        val vm = OpenAIChatViewModel(delayedHistory, Repository(settings), client { flow { emit(completed) } })
+        runCurrent()
+        vm.showHistory(true); runCurrent()
+        vm.showHistory(false); vm.showHistory(true); runCurrent()
+        assertTrue(vm.uiState.value.historyLoading)
+        gate.complete(Unit); advanceUntilIdle()
+        assertFalse(vm.uiState.value.historyLoading)
+    }
+
+    @Test fun savedChatReopensWithImagesAndContinuesUsingCompletedContext() = runTest {
+        val requests = mutableListOf<OpenAIRequest>()
+        val api = client { request -> requests += request; flow { emit(OpenAIStreamEvent.TextDelta("Saved answer")); emit(completed) } }
+        val repository = Repository(settings)
+        val vm = OpenAIChatViewModel(history, repository, api)
+        runCurrent()
+        val image = OpenAIImage("data:image/png;base64,test")
+        vm.setImage(image); vm.setPrompt("First message"); vm.submit(); advanceUntilIdle()
+        val savedId = vm.uiState.value.chatId
+        assertEquals(TurnStatus.Completed, history.chats.getValue(savedId).turns.single().status)
+        vm.newChat(); advanceUntilIdle()
+        assertTrue(vm.uiState.value.turns.isEmpty())
+        assertEquals(1, history.chats.size)
+        val reopened = OpenAIChatViewModel(history, repository, api)
+        runCurrent()
+        reopened.showHistory(true); advanceUntilIdle()
+        assertEquals("First message", reopened.uiState.value.historyEntries.single().title)
+        reopened.openChat(savedId); advanceUntilIdle()
+        assertEquals(listOf(image), reopened.uiState.value.turns.single().user.images)
+        assertFalse(reopened.uiState.value.historyOpen)
+        reopened.setPrompt("Follow-up"); reopened.submit(); advanceUntilIdle()
+        assertEquals(listOf("First message", "Saved answer", "Follow-up"), requests.last().messages.map { it.text })
+        assertEquals(listOf(image), requests.last().messages.first().images)
+        assertEquals(2, history.chats.getValue(savedId).turns.size)
+    }
+
+    @Test fun deletingTheCurrentChatCannotResurrectItsOldMessages() = runTest {
+        val vm = OpenAIChatViewModel(history, Repository(settings), client { flow { emit(completed) } })
+        runCurrent()
+        vm.setPrompt("Delete me"); vm.submit(); advanceUntilIdle()
+        val deletedId = vm.uiState.value.chatId
+        vm.showHistory(true); advanceUntilIdle()
+        vm.deleteChat(deletedId); advanceUntilIdle()
+        assertTrue(history.chats.isEmpty())
+        assertTrue(vm.uiState.value.turns.isEmpty())
+        assertNotEquals(deletedId, vm.uiState.value.chatId)
+        vm.showHistory(false); vm.setPrompt("New message"); vm.submit(); advanceUntilIdle()
+        assertFalse(history.chats.containsKey(deletedId))
+        assertEquals("New message", history.chats.values.single().turns.single().user.text)
+    }
+
     @Test fun presetConfigOverridesAllAiFieldsAndRetryKeepsTheOriginalConfiguration() = runTest {
         val custom = AiConfiguration(OpenAIModelConfig(apiKey = "preset-test-key", model = "preset-model",
             baseUrl = "https://preset.example.com/v1", protocol = ApiProtocol.Responses, reasoningEffort = "high", webSearch = false), "Preset instructions")
@@ -39,7 +117,7 @@ class OpenAIChatViewModelTest {
                 emit(OpenAIStreamEvent.TextDelta("Answer")); emit(completed)
             }
         }
-        val vm = OpenAIChatViewModel(Repository(configured), api)
+        val vm = OpenAIChatViewModel(history, Repository(configured), api)
         runCurrent()
         vm.selectPreset("custom"); vm.submit(); advanceUntilIdle()
         vm.selectPreset(null); vm.retry(); advanceUntilIdle()
@@ -51,7 +129,7 @@ class OpenAIChatViewModelTest {
     }
 
     @Test fun failedCaptureOpensTextOnlyAndDoesNotRepeatAfterRecreation() = runTest {
-        val vm = OpenAIChatViewModel(Repository(settings), client { flow { emit(completed) } }, invoked = true)
+        val vm = OpenAIChatViewModel(history, Repository(settings), client { flow { emit(completed) } }, invoked = true)
         runCurrent()
         var captures = 0
         vm.captureOnInvocation { captures++; throw ScreenCaptureException("Protected screen") }
@@ -73,7 +151,7 @@ class OpenAIChatViewModelTest {
     }
 
     @Test fun unsavedSettingsDraftSurvivesReloadWithoutPersistingSecretsInSavedState() = runTest {
-        val vm = OpenAIChatViewModel(Repository(settings), client { flow { emit(completed) } })
+        val vm = OpenAIChatViewModel(history, Repository(settings), client { flow { emit(completed) } })
         runCurrent()
         vm.showSettings(true)
         val draft = settings.copy(api = settings.api.copy(model = "draft-model"))
@@ -88,7 +166,7 @@ class OpenAIChatViewModelTest {
 
     @Test fun followUpIncludesTheCompletedConversationAndOriginalImage() = runTest {
         val requests = mutableListOf<OpenAIRequest>()
-        val vm = OpenAIChatViewModel(Repository(settings), client { request ->
+        val vm = OpenAIChatViewModel(history, Repository(settings), client { request ->
             requests += request
             flow { emit(OpenAIStreamEvent.TextDelta("Answer ${requests.size}")); emit(completed) }
         })
@@ -108,7 +186,7 @@ class OpenAIChatViewModelTest {
     }
 
     @Test fun stopFlushesTextThatHasNotReachedTheDisplayInterval() = runTest {
-        val vm = OpenAIChatViewModel(Repository(settings), client {
+        val vm = OpenAIChatViewModel(history, Repository(settings), client {
             flow { emit(OpenAIStreamEvent.TextDelta("Already received")); awaitCancellation() }
         })
         runCurrent()
@@ -125,7 +203,7 @@ class OpenAIChatViewModelTest {
 
     @Test fun retryReusesTheOriginalInputWithoutDuplicatingTheFailedTurn() = runTest {
         val requests = mutableListOf<OpenAIRequest>()
-        val vm = OpenAIChatViewModel(Repository(settings), client { request ->
+        val vm = OpenAIChatViewModel(history, Repository(settings), client { request ->
             requests += request
             flow {
                 emit(OpenAIStreamEvent.TextDelta(if (requests.size == 1) "Partial" else "Complete"))
@@ -150,7 +228,7 @@ class OpenAIChatViewModelTest {
 
     @Test fun failedTurnsStayVisibleButDoNotBecomeFollowUpContext() = runTest {
         val requests = mutableListOf<OpenAIRequest>()
-        val vm = OpenAIChatViewModel(Repository(settings), client { request ->
+        val vm = OpenAIChatViewModel(history, Repository(settings), client { request ->
             requests += request
             flow {
                 if (requests.size == 1) {
@@ -170,7 +248,7 @@ class OpenAIChatViewModelTest {
 
     @Test fun savedSettingsAreLoadedAndChangingThemStartsANewConversation() = runTest {
         val repository = Repository(settings)
-        val vm = OpenAIChatViewModel(repository, client { flow { emit(completed) } })
+        val vm = OpenAIChatViewModel(history, repository, client { flow { emit(completed) } })
         runCurrent()
         vm.setPrompt("Question"); vm.submit(); advanceUntilIdle()
         val changed = settings.copy(api = settings.api.copy(model = "another-model"))
@@ -190,7 +268,7 @@ class OpenAIChatViewModelTest {
             override suspend fun save(settings: AppSettings) { throw java.io.IOException("Storage unavailable") }
             override suspend fun rememberPreset(id: String?) = Unit
         }
-        val vm = OpenAIChatViewModel(repository, client { flow { emit(completed) } })
+        val vm = OpenAIChatViewModel(history, repository, client { flow { emit(completed) } })
         runCurrent()
         vm.saveSettings(settings.copy(instructions = "New instructions"))
         advanceUntilIdle()
@@ -203,7 +281,7 @@ class OpenAIChatViewModelTest {
         val repository = Repository(settings)
         val requests = mutableListOf<OpenAIRequest>()
         val api = client { request -> requests += request; flow { emit(completed) } }
-        val vm = OpenAIChatViewModel(repository, api)
+        val vm = OpenAIChatViewModel(history, repository, api)
         runCurrent()
         vm.selectPreset("translate")
         assertEquals(settings.presets[1].prompt, vm.uiState.value.prompt)
@@ -216,13 +294,13 @@ class OpenAIChatViewModelTest {
         advanceUntilIdle()
         assertEquals("translate", vm.uiState.value.selectedPreset)
         assertEquals(settings.presets[1].prompt, vm.uiState.value.prompt)
-        val reopened = OpenAIChatViewModel(repository, api)
+        val reopened = OpenAIChatViewModel(history, repository, api)
         runCurrent()
         assertEquals("translate", reopened.uiState.value.selectedPreset)
         assertEquals(settings.presets[1].prompt, reopened.uiState.value.prompt)
         reopened.selectPreset(null)
         advanceUntilIdle()
-        val textOnly = OpenAIChatViewModel(repository, api)
+        val textOnly = OpenAIChatViewModel(history, repository, api)
         runCurrent()
         assertNull(textOnly.uiState.value.selectedPreset)
         assertEquals("", textOnly.uiState.value.prompt)
@@ -230,7 +308,7 @@ class OpenAIChatViewModelTest {
 
     @Test fun connectionTestsCarryTheirLoggingPurposeAndInstructions() = runTest {
         val requests = mutableListOf<OpenAIRequest>()
-        val vm = OpenAIChatViewModel(Repository(settings), client { request -> requests += request; flow { emit(completed) } })
+        val vm = OpenAIChatViewModel(history, Repository(settings), client { request -> requests += request; flow { emit(completed) } })
         runCurrent()
         vm.testConnection(AiConfiguration(settings.api, "Test instructions"), "Default AI")
         advanceUntilIdle()
@@ -240,7 +318,7 @@ class OpenAIChatViewModelTest {
     }
 
     @Test fun editingSelectedPresetRefreshesPrefillButPreservesUserEdits() = runTest {
-        val vm = OpenAIChatViewModel(Repository(settings), client { flow { emit(completed) } })
+        val vm = OpenAIChatViewModel(history, Repository(settings), client { flow { emit(completed) } })
         runCurrent()
         val updated = settings.copy(presets = settings.presets.map { it.copy(prompt = "Updated preset") })
         vm.saveSettings(updated)

@@ -6,14 +6,22 @@ import androidx.lifecycle.viewModelScope
 import app.touchai.core.openai.*
 import java.net.URI
 import java.net.URISyntaxException
+import java.io.InputStream
+import java.io.OutputStream
+import java.util.UUID
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 enum class TurnStatus { Streaming, Completed, Stopped, Incomplete, Failed }
 
@@ -33,6 +41,12 @@ data class OpenAIChatUiState(
     val ready: Boolean = false,
     val settingsOpen: Boolean = false,
     val logsOpen: Boolean = false,
+    val historyOpen: Boolean = false,
+    val historyLoading: Boolean = false,
+    val historyTransferring: Boolean = false,
+    val historyNotice: String? = null,
+    val historyEntries: List<ChatHistoryEntry> = emptyList(),
+    val chatId: String = UUID.randomUUID().toString(),
     val settingsDraft: AppSettings? = null,
     val savingSettings: Boolean = false,
     val testingConnection: Boolean = false,
@@ -54,6 +68,7 @@ data class OpenAIChatUiState(
 }
 
 class OpenAIChatViewModel(
+    private val history: ChatHistoryRepository,
     private val repository: SettingsRepository,
     private val client: ChatClient,
     private val closeClient: () -> Unit = {},
@@ -66,6 +81,7 @@ class OpenAIChatViewModel(
     private var captureJob: Job? = null
     private var captureRequested = false
     private var presetSaveJob: Job? = null
+    private var historyJob: Job? = null
 
     init { loadSettings() }
 
@@ -98,12 +114,83 @@ class OpenAIChatViewModel(
     fun showSettings(open: Boolean) = update { it.copy(settingsOpen = open,
         settingsDraft = if (open) it.settings else null, error = null, connectionResult = null) }
     fun showLogs(open: Boolean) = update { it.copy(logsOpen = open) }
+    fun showHistory(open: Boolean) {
+        if (_uiState.value.isStreaming || _uiState.value.historyTransferring) return
+        historyJob?.cancel()
+        update { it.copy(historyOpen = open, historyLoading = open, historyNotice = null, error = null) }
+        if (open) historyJob = viewModelScope.launch {
+            try {
+                streamJob?.join()
+                val entries = history.list()
+                update { it.copy(historyEntries = entries) }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { reportError("Could not load chat history: ${error.message}") }
+            finally { if (currentCoroutineContext().isActive) update { it.copy(historyLoading = false) } }
+        }
+    }
+
+    fun exportHistory(openOutput: () -> OutputStream) = transferHistory("Exported") {
+        ChatHistoryArchive(history).exportTo(openOutput())
+    }
+
+    fun importHistory(openInput: () -> InputStream) = transferHistory("Imported") {
+        ChatHistoryArchive(history).importFrom(openInput()) { image -> ImageProcessor.decode(image, 64).recycle() }
+    }
+
+    private fun transferHistory(action: String, transfer: suspend () -> Int) {
+        if (_uiState.value.historyLoading || _uiState.value.isStreaming) return
+        update { it.copy(historyLoading = true, historyTransferring = true, historyNotice = null, error = null) }
+        viewModelScope.launch {
+            try {
+                val count = withContext(Dispatchers.IO) { transfer() }
+                val entries = history.list()
+                update { it.copy(historyEntries = entries, historyNotice = "$action $count ${if (count == 1) "chat" else "chats"}") }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) {
+                reportError("${if (action == "Imported") "Import" else "Export"} failed: ${error.message}")
+            } finally { update { it.copy(historyLoading = false, historyTransferring = false) } }
+        }
+    }
+
+    fun openChat(id: String) {
+        if (_uiState.value.historyLoading || _uiState.value.isStreaming) return
+        update { it.copy(historyLoading = true, error = null) }
+        historyJob = viewModelScope.launch {
+            try {
+                val chat = history.load(id)
+                val settings = repository.load()
+                val selected = chat.selectedPreset?.takeIf { id -> settings.presets.any { it.id == id } }
+                imageJob?.cancel()
+                update { it.copy(chatId = chat.id, turns = chat.turns, settings = settings, ready = true,
+                    selectedPreset = selected, prompt = "", image = null, imagePreview = null, originalImage = null,
+                    imageCrop = ImageCrop.Full, cropping = false, preparingImage = false, historyOpen = false) }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { reportError("Could not open chat: ${error.message}") }
+            finally { if (currentCoroutineContext().isActive) update { it.copy(historyLoading = false) } }
+        }
+    }
+
+    fun deleteChat(id: String) {
+        if (_uiState.value.historyLoading || _uiState.value.isStreaming) return
+        update { it.copy(historyLoading = true, error = null) }
+        historyJob = viewModelScope.launch {
+            try {
+                history.delete(id)
+                update { it.copy(historyEntries = it.historyEntries.filterNot { entry -> entry.id == id },
+                    chatId = if (it.chatId == id) UUID.randomUUID().toString() else it.chatId,
+                    turns = if (it.chatId == id) emptyList() else it.turns) }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { reportError("Could not delete chat: ${error.message}") }
+            finally { update { it.copy(historyLoading = false) } }
+        }
+    }
     fun editSettings(value: AppSettings) = update { it.copy(settingsDraft = value, error = null, connectionResult = null) }
 
     fun prepareInvocation() {
         if (captureJob?.isActive == true) return
         captureRequested = false
-        update { it.copy(invoking = true, settingsOpen = false, logsOpen = false, settingsDraft = null) }
+        showHistory(false)
+        update { it.copy(invoking = true, settingsOpen = false, logsOpen = false, historyOpen = false, settingsDraft = null) }
     }
 
     fun captureOnInvocation(capture: suspend () -> Bitmap) {
@@ -113,7 +200,7 @@ class OpenAIChatViewModel(
         captureJob = viewModelScope.launch {
             streamJob?.cancelAndJoin()
             imageJob?.cancelAndJoin()
-            update { it.copy(turns = emptyList(), image = null, imagePreview = null, originalImage = null,
+            update { it.copy(chatId = UUID.randomUUID().toString(), turns = emptyList(), image = null, imagePreview = null, originalImage = null,
                 cropping = false, preparingImage = false, error = null) }
             try {
                 val bitmap = capture()
@@ -185,6 +272,7 @@ class OpenAIChatViewModel(
                     val selected = current.selectedPreset?.takeIf { id -> saved.presets.any { it.id == id } }
                     current.copy(settings = saved, ready = true, settingsOpen = false, settingsDraft = null,
                         turns = if (saved == current.settings) current.turns else emptyList(), selectedPreset = selected,
+                        chatId = if (saved == current.settings) current.chatId else UUID.randomUUID().toString(),
                         prompt = if (current.prompt == presetText(current.settings, current.selectedPreset)) presetText(saved, selected) else current.prompt)
                 }
                 if (saved.imageQuality != before.settings.imageQuality) {
@@ -230,7 +318,14 @@ class OpenAIChatViewModel(
     fun retry() {
         val snapshot = _uiState.value
         if (snapshot.isStreaming || snapshot.turns.isEmpty() || snapshot.savingSettings) return
-        updateLast { it.copy(answer = "", status = TurnStatus.Streaming, error = null, searchStatus = null, citations = emptyList()) }
+        val original = snapshot.turns.last().ai.api
+        val configurations = listOf(snapshot.settings.api) + snapshot.settings.presets.mapNotNull { it.customAi?.api }
+        val api = if (original.apiKey.isNotBlank()) original else original.copy(apiKey = configurations.firstOrNull {
+            it.apiKey.isNotBlank() && it.baseUrl.trimEnd('/') == original.baseUrl.trimEnd('/') && it.protocol == original.protocol
+        }?.apiKey.orEmpty())
+        val error = apiError(api, requireCredentials = true)
+        if (error != null) { reportError(error); return }
+        updateLast { it.copy(ai = it.ai.copy(api = api), answer = "", status = TurnStatus.Streaming, error = null, searchStatus = null, citations = emptyList()) }
         startRequest(RequestPurpose.Retry)
     }
 
@@ -243,6 +338,7 @@ class OpenAIChatViewModel(
         streamJob = viewModelScope.launch {
             val buffer = StreamingTextBuffer(this) { delta -> updateLast { it.copy(answer = it.answer + delta) } }
             try {
+                persistChat(snapshot)
                 client.stream(turn.ai.api, OpenAIRequest(messages, turn.ai.instructions, purpose, turn.presetName)).collect { event ->
                     when (event) {
                         is OpenAIStreamEvent.TextDelta -> buffer.append(event.text)
@@ -258,14 +354,25 @@ class OpenAIChatViewModel(
                 buffer.flush(); updateLast { it.copy(status = TurnStatus.Incomplete, error = error.message) }
             } catch (error: Exception) {
                 buffer.flush(); updateLast { it.copy(status = TurnStatus.Failed, error = error.message ?: "Request failed.") }
-            } finally { buffer.flush() }
+            } finally {
+                buffer.flush()
+                val finished = _uiState.value
+                withContext(NonCancellable) { persistChat(finished) }
+            }
         }
+    }
+
+    private suspend fun persistChat(state: OpenAIChatUiState) {
+        try { history.save(SavedChat(state.chatId, System.currentTimeMillis(), state.selectedPreset, state.turns)) }
+        catch (error: CancellationException) { throw error }
+        catch (error: Exception) { reportError("Could not save chat: ${error.message}") }
     }
 
     fun cancel() { streamJob?.cancel() }
     fun newChat() {
-        if (_uiState.value.isStreaming || _uiState.value.preparingImage) return
-        update { it.copy(ready = false, turns = emptyList(), prompt = "", image = null, imagePreview = null,
+        if (_uiState.value.isStreaming || _uiState.value.preparingImage || _uiState.value.historyLoading) return
+        showHistory(false)
+        update { it.copy(chatId = UUID.randomUUID().toString(), ready = false, turns = emptyList(), prompt = "", image = null, imagePreview = null,
             originalImage = null, imageCrop = ImageCrop.Full, cropping = false, error = null) }
         loadSettings()
     }
