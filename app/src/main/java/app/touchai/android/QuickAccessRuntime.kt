@@ -34,6 +34,7 @@ class QuickAccessRuntime(private val context: Context, private val repository: D
     private var service: ScreenCaptureService? = null
     private var appVisible = false
     private var optionsLoaded = false
+    private var collapsedChat = false
 
     init {
         scope.launch {
@@ -62,7 +63,25 @@ class QuickAccessRuntime(private val context: Context, private val repository: D
 
     fun setAppVisible(visible: Boolean) {
         appVisible = visible
-        service?.setBubbleVisible(optionsLoaded && state.value.options.floatingButton && !visible)
+        updateOverlays()
+    }
+
+    fun showChatRestoreHandle() {
+        val connectedService = service
+            ?: throw ScreenCaptureException("Enable screen capture access to keep a restore handle over other apps.")
+        collapsedChat = true
+        connectedService.setBubbleVisible(false)
+        connectedService.setRestoreHandleVisible(true)
+    }
+
+    fun clearChatRestoreHandle() {
+        collapsedChat = false
+        updateOverlays()
+    }
+
+    private fun updateOverlays() {
+        service?.setBubbleVisible(optionsLoaded && state.value.options.floatingButton && !appVisible && !collapsedChat)
+        service?.setRestoreHandleVisible(collapsedChat)
     }
 
     fun refreshPermissions() {
@@ -79,7 +98,7 @@ class QuickAccessRuntime(private val context: Context, private val repository: D
     private fun applyOptions() {
         if (!optionsLoaded) return
         service?.updateButtonPosition(state.value.options)
-        service?.setBubbleVisible(state.value.options.floatingButton && !appVisible)
+        updateOverlays()
         updateNotification()
     }
 

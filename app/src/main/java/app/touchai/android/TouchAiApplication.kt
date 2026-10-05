@@ -17,6 +17,8 @@ class TouchAiApplication : Application() {
     val quickAccess by lazy { QuickAccessRuntime(this, settingsRepository) }
     val requestLogs by lazy { RequestLogStore(this) }
     val chatHistory by lazy { ChatHistoryStore(File(filesDir, "chats"), ApiKeyCipher()) }
+    internal val chatSessionTransfer = ChatSessionTransfer()
+    internal val collapsedChatSession = ChatSessionTransfer()
 
     override fun onCreate() {
         super.onCreate()

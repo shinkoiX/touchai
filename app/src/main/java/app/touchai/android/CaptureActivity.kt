@@ -7,47 +7,30 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.runtime.getValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.RectangleShape
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.key
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.ViewModelProvider
 
 class CaptureActivity : ComponentActivity() {
     private val app get() = application as TouchAiApplication
-    private val viewModel by viewModels<OpenAIChatViewModel> { app.chatViewModelFactory(invoked = true) }
+    private val session by viewModels<ChatSessionOwner>()
+    private val viewModel by lazy { ViewModelProvider(session, app.chatViewModelFactory(invoked = intent.action != RestoreChat))[OpenAIChatViewModel::class.java] }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (intent.action == RestoreChat) app.collapsedChatSession.take()?.let(session::adopt)
+        else app.collapsedChatSession.clear()
+        app.quickAccess.clearChatRestoreHandle()
         setContent {
             TouchAiTheme {
                 val state by viewModel.uiState.collectAsStateWithLifecycle()
                 // Until capture finishes this activity draws nothing over the previous app.
                 if (!state.invoking) {
-                    BoxWithConstraints(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.32f))) {
-                        val landscape = maxWidth > maxHeight
-                        Column(Modifier.fillMaxSize()) {
-                            if (!landscape) Spacer(Modifier.weight(0.12f).fillMaxWidth().clickable { finish() })
-                            Surface(Modifier.weight(if (landscape) 1f else 0.88f).fillMaxWidth(),
-                                shape = if (landscape) RectangleShape else RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)) {
-                                Column {
-                                    if (!landscape) Box(Modifier.fillMaxWidth().padding(top = 10.dp), contentAlignment = Alignment.Center) {
-                                        Box(Modifier.size(32.dp, 4.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outlineVariant))
-                                    }
-                                    OpenAIChatScreen(viewModel, app.quickAccess, onClose = ::finish)
-                                }
-                            }
+                    key(state.chatId) {
+                        QuickChatPanel(onClose = ::finish, onOpenApp = ::openInApp, onCollapse = ::collapseChat) {
+                            OpenAIChatScreen(viewModel, app.quickAccess, onClose = ::finish)
                         }
                     }
                 }
@@ -57,12 +40,15 @@ class CaptureActivity : ComponentActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) requestCapture()
+        if (hasFocus && intent.action != RestoreChat) requestCapture()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        app.quickAccess.clearChatRestoreHandle()
+        if (intent.action == RestoreChat) return
+        app.collapsedChatSession.clear()
         viewModel.prepareInvocation()
         if (window.decorView.hasWindowFocus()) requestCapture()
     }
@@ -72,8 +58,25 @@ class CaptureActivity : ComponentActivity() {
         viewModel.captureOnInvocation { app.quickAccess.capture(fromNotification) }
     }
 
+    private fun openInApp() {
+        app.chatSessionTransfer.offer(session.detach())
+        startActivity(Intent(this, MainActivity::class.java).setAction(MainActivity.OpenChat)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP))
+        finish()
+    }
+
+    private fun collapseChat(): Boolean {
+        try { app.quickAccess.showChatRestoreHandle() }
+        catch (error: ScreenCaptureException) { viewModel.reportError(error.message!!); return false }
+        app.collapsedChatSession.offer(session.detach())
+        finish()
+        return true
+    }
+
     companion object {
         private const val FromNotification = "from_notification"
+        private const val RestoreChat = "app.touchai.android.RESTORE_CHAT"
+        fun restoreIntent(context: Context) = intent(context).setAction(RestoreChat)
         fun intent(context: Context, fromNotification: Boolean = false) = Intent(context, CaptureActivity::class.java)
             .putExtra(FromNotification, fromNotification)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NO_ANIMATION)

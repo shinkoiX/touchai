@@ -25,6 +25,13 @@ that text and press **Send**. No image is uploaded before Send. Selecting **No
 preset** is also remembered.
 
 Drag the floating button to move it; it snaps to an edge and remembers its position.
+Drag the quick chat panel's handle upward to continue the same conversation in the
+main app, including its draft, attachment, and running response. Drag downward to
+collapse the panel temporarily. A small restore handle stays above other apps;
+tap it or swipe it upward to restore the same chat without taking another screenshot.
+While collapsed, you can tap, scroll, and use the underlying apps normally. The
+draft, attachment, and running response stay alive. Opening TouchAI also resumes
+the collapsed chat. Starting a new capture replaces it.
 The notification works with the floating button disabled. Android may allow ongoing
 notifications to be dismissed; reopening TouchAI restores an enabled notification.
 
