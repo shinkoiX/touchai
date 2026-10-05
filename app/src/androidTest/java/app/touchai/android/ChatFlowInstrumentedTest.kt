@@ -4,7 +4,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import androidx.activity.ComponentActivity
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.ViewModelStore
@@ -47,7 +46,7 @@ class ChatFlowInstrumentedTest {
             }
         }
         compose.runOnUiThread { viewModel = OpenAIChatViewModel(repository, client); store.put("test", viewModel) }
-        compose.setContent { MaterialTheme { OpenAIChatScreen(viewModel, (compose.activity.application as TouchAiApplication).quickAccess) } }
+        compose.setContent { TouchAiTheme { OpenAIChatScreen(viewModel, (compose.activity.application as TouchAiApplication).quickAccess) } }
         compose.waitUntil(5_000) { viewModel.uiState.value.ready }
     }
 
@@ -58,14 +57,14 @@ class ChatFlowInstrumentedTest {
         val bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
         compose.runOnUiThread { viewModel.attachImage(bitmap) }
         compose.onNodeWithText("Review screenshot").assertDoesNotExist()
-        compose.onNodeWithText("Send", useUnmergedTree = true).assertIsDisplayed()
+        compose.onNodeWithContentDescription("Send").assertIsDisplayed()
         compose.onNode(hasSetTextAction()).assertTextContains("Explain this image")
         compose.onNodeWithContentDescription("Crop image").performClick()
         compose.onNodeWithText("100 × 100 px").assertIsDisplayed()
-        compose.onNodeWithText("Apply crop", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("Apply", useUnmergedTree = true).performClick()
         compose.waitUntil(5_000) { viewModel.uiState.value.image != null }
         compose.onNodeWithText("Custom", useUnmergedTree = true).performClick()
-        compose.onNodeWithText("Send", useUnmergedTree = true).performClick()
+        compose.onNodeWithContentDescription("Send").performClick()
         compose.waitUntil(5_000) { request != null }
         assertEquals(custom.api, configuration)
         val bytes = Base64.getDecoder().decode(request!!.messages.last().images.single().url.substringAfter(','))
@@ -76,7 +75,7 @@ class ChatFlowInstrumentedTest {
         compose.waitUntil(5_000) { viewModel.uiState.value.turns.last().answer.isNotBlank() }
         assertTrue(viewModel.uiState.value.isStreaming)
         compose.onNodeWithText("Visible before completion", substring = true).assertExists()
-        compose.onNodeWithText("Stop", useUnmergedTree = true).performClick()
+        compose.onNodeWithContentDescription("Stop").performClick()
         compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
         compose.onNodeWithText("Stopped").assertExists()
         assertEquals("Visible before completion", viewModel.uiState.value.turns.last().answer)
@@ -95,11 +94,11 @@ class ChatFlowInstrumentedTest {
         compose.onNodeWithText("60 × 120 px").assertIsDisplayed()
         compose.onNodeWithText("Reset", useUnmergedTree = true).performClick()
         compose.onNodeWithText("100 × 200 px").assertIsDisplayed()
-        compose.onNodeWithText("Cancel", useUnmergedTree = true).performClick()
+        compose.onNodeWithContentDescription("Cancel").performClick()
         assertEquals(60, viewModel.uiState.value.imagePreview!!.width)
         compose.onNodeWithContentDescription("Crop image").performClick()
         compose.onNodeWithText("Reset", useUnmergedTree = true).performClick()
-        compose.onNodeWithText("Apply crop", useUnmergedTree = true).performClick()
+        compose.onNodeWithText("Apply", useUnmergedTree = true).performClick()
         compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage }
         assertEquals(100, viewModel.uiState.value.imagePreview!!.width)
         assertEquals(200, viewModel.uiState.value.imagePreview!!.height)
@@ -110,7 +109,7 @@ class ChatFlowInstrumentedTest {
         compose.runOnUiThread { viewModel.attachImage(Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888)) }
         compose.onNodeWithContentDescription("Remove image").performClick()
         compose.onNode(hasSetTextAction()).performTextReplacement("Only text")
-        compose.onNodeWithText("Send", useUnmergedTree = true).performClick()
+        compose.onNodeWithContentDescription("Send").performClick()
         compose.waitUntil(5_000) { request != null }
         assertEquals("Only text", request!!.messages.last().text)
         assertTrue(request!!.messages.last().images.isEmpty())

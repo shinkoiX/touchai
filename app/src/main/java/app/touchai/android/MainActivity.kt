@@ -6,7 +6,9 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.Surface
+import androidx.compose.ui.Modifier
 
 class MainActivity : ComponentActivity() {
     private val app get() = application as TouchAiApplication
@@ -16,7 +18,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         if (intent.action == OpenSettings) viewModel.showSettings(true)
-        setContent { MaterialTheme { OpenAIChatScreen(viewModel, app.quickAccess) } }
+        setContent { TouchAiTheme { Surface(Modifier.fillMaxSize()) { OpenAIChatScreen(viewModel, app.quickAccess) } } }
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -1,7 +1,6 @@
 package app.touchai.android
 
 import androidx.activity.ComponentActivity
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -50,13 +49,14 @@ class RequestLogInstrumentedTest {
     @Test fun logsCanBeInspectedAndClearedInUi() {
         val logs = open()
         runBlocking { logs.started(record()); logs.finished(record("Completed")) }
-        compose.setContent { MaterialTheme { RequestLogScreen(logs) {} } }
-        compose.waitUntil(5_000) { compose.onAllNodesWithText("Completed · Chat").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("Completed · Chat").performClick()
-        compose.onNodeWithText("Copy log").assertExists()
+        compose.setContent { TouchAiTheme { RequestLogScreen(logs) {} } }
+        compose.waitUntil(5_000) { compose.onAllNodesWithText("Completed").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Chat").assertExists()
+        compose.onNodeWithText("test-model").performClick()
+        compose.onNodeWithContentDescription("Copy log").assertExists()
         compose.onNodeWithText("Test instructions", substring = true).assertExists()
-        compose.onNodeWithText("Clear logs").performClick()
+        compose.onNodeWithContentDescription("Clear logs").performClick()
         compose.onNodeWithText("Clear", useUnmergedTree = true).performClick()
-        compose.waitUntil(5_000) { compose.onAllNodesWithText("No requests recorded yet.").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(5_000) { compose.onAllNodesWithText("No requests yet").fetchSemanticsNodes().isNotEmpty() }
     }
 }

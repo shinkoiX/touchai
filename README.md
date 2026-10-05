@@ -6,7 +6,7 @@ Android 11 or later and is intended for personal use as a sideloaded APK.
 ## Start using it
 
 1. Install `app/build/outputs/apk/debug/app-debug.apk` and open TouchAI.
-2. In **Settings → Quick access**, select **Enable screen capture**, then enable
+2. In **Settings → Quick access**, select **Enable** next to Screen capture, then enable
    **TouchAI screen capture** in Android Accessibility settings. Android may first
    require **App info → Allow restricted settings** for a sideloaded installation.
 3. Allow notifications. Enable the floating button, the quick-access notification,

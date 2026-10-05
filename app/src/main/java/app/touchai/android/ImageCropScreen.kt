@@ -3,8 +3,7 @@ package app.touchai.android
 import android.graphics.Bitmap
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
@@ -12,7 +11,9 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -35,31 +36,19 @@ import kotlin.math.roundToInt
 fun ImageCropScreen(bitmap: Bitmap, initialCrop: ImageCrop, onApply: (ImageCrop) -> Unit, onCancel: () -> Unit) {
     var crop by rememberSaveable(bitmap, stateSaver = CropSaver) { mutableStateOf(initialCrop) }
     BackHandler { onCancel() }
-    BoxWithConstraints(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).padding(16.dp)) {
-        if (maxWidth > maxHeight) {
-            Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                CropEditor(bitmap, crop, { crop = it }, Modifier.weight(0.65f).fillMaxHeight(), enabled = true)
-                Column(Modifier.weight(0.35f).fillMaxHeight().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Crop screenshot", style = MaterialTheme.typography.titleLarge)
-                    Text("Drag a corner to resize. Reset selects the full image.", style = MaterialTheme.typography.bodySmall)
-                    Button(onClick = { onApply(crop) }, modifier = Modifier.fillMaxWidth()) { Text("Apply crop") }
-                    OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
-                }
-            }
-        } else {
-            Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Crop screenshot", style = MaterialTheme.typography.titleLarge)
-                Text("Drag a corner to resize. Reset selects the full image.", style = MaterialTheme.typography.bodySmall)
-                CropEditor(bitmap, crop, { crop = it }, Modifier.weight(1f).fillMaxWidth(), enabled = true)
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) { Text("Cancel") }
-                    Button(onClick = { onApply(crop) }, modifier = Modifier.weight(1f)) { Text("Apply crop") }
-                }
+    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+        AppTopBar("Crop", navigation = { AppIconButton(R.drawable.ic_close, "Cancel", onCancel) }) {
+            Button(onClick = { onApply(crop) }, modifier = Modifier.padding(end = 8.dp)) {
+                AppIcon(R.drawable.ic_check, null, size = 18.dp)
+                Spacer(Modifier.width(8.dp))
+                Text("Apply")
             }
         }
+        CropEditor(bitmap, crop, { crop = it }, Modifier.weight(1f).fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp), enabled = true)
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CropEditor(bitmap: Bitmap, crop: ImageCrop, onCrop: (ImageCrop) -> Unit, modifier: Modifier, enabled: Boolean) {
     var viewport by remember { mutableStateOf(IntSize.Zero) }
@@ -83,13 +72,17 @@ private fun CropEditor(bitmap: Bitmap, crop: ImageCrop, onCrop: (ImageCrop) -> U
         val y = ((rect.height - viewport.height) / 2f).coerceAtLeast(0f)
         return Offset(value.x.coerceIn(-x, x), value.y.coerceIn(-y, y))
     }
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            FilterChip(!panMode, { panMode = false }, label = { Text("Adjust crop") }, enabled = enabled)
-            FilterChip(panMode, { panMode = true }, label = { Text("Pan / zoom") }, enabled = enabled)
-            TextButton(onClick = { zoom = 1f; pan = Offset.Zero; onCrop(ImageCrop.Full) }, enabled = enabled) { Text("Reset") }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            SingleChoiceSegmentedButtonRow(Modifier.weight(1f)) {
+                SegmentedButton(!panMode, { panMode = false }, SegmentedButtonDefaults.itemShape(0, 2), enabled = enabled,
+                    icon = { AppIcon(R.drawable.ic_crop, null, size = 18.dp) }) { Text("Crop") }
+                SegmentedButton(panMode, { panMode = true }, SegmentedButtonDefaults.itemShape(1, 2), enabled = enabled,
+                    icon = { AppIcon(R.drawable.ic_pan, null, size = 18.dp) }) { Text("Move") }
+            }
+            TextButton(onClick = { zoom = 1f; pan = Offset.Zero; onCrop(ImageCrop.Full) }, enabled = enabled, modifier = Modifier.padding(start = 8.dp)) { Text("Reset") }
         }
-        Canvas(Modifier.weight(1f).fillMaxWidth().clipToBounds().onSizeChanged { viewport = it }
+        Canvas(Modifier.weight(1f).fillMaxWidth().clip(MaterialTheme.shapes.large).background(MaterialTheme.colorScheme.surfaceContainerHighest).clipToBounds().onSizeChanged { viewport = it }
             .semantics { contentDescription = "Crop selection" }
             .pointerInput(bitmap, panMode, enabled) {
                 if (!enabled) return@pointerInput
@@ -139,12 +132,12 @@ private fun CropEditor(bitmap: Bitmap, crop: ImageCrop, onCrop: (ImageCrop) -> U
             drawRect(Color.White, selection.topLeft, selection.size, style = Stroke(2.dp.toPx()))
             listOf(selection.topLeft, selection.topRight, selection.bottomLeft, selection.bottomRight).forEach { drawCircle(Color.White, 7.dp.toPx(), it) }
         }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Zoom ${((zoom * 10).roundToInt() / 10f)}×", style = MaterialTheme.typography.labelMedium)
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("${((zoom * 10).roundToInt() / 10f)}×", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Slider(zoom, { zoom = it; pan = constrainPan(pan) }, valueRange = 1f..4f, enabled = enabled, modifier = Modifier.weight(1f))
             val pixels = crop.pixels(bitmap.width, bitmap.height)
-            Text("${pixels.width} × ${pixels.height} px", style = MaterialTheme.typography.labelMedium)
+            Text("${pixels.width} × ${pixels.height} px", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        Slider(zoom, { zoom = it; pan = constrainPan(pan) }, valueRange = 1f..4f, enabled = enabled)
     }
 }
 

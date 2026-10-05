@@ -2,32 +2,43 @@ package app.touchai.android
 
 import android.content.ClipData
 import android.content.ClipboardManager
+import android.graphics.Bitmap
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.touchai.core.markdown.StreamingMarkdown
@@ -39,7 +50,6 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val quickAccess by runtime.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
-    val uriHandler = LocalUriHandler.current
     val keyboard = LocalSoftwareKeyboardController.current
     val compact = LocalWindowInfo.current.containerSize.height / LocalDensity.current.density < 450f
     val compactKeyboard = compact && WindowInsets.ime.getBottom(LocalDensity.current) > 0
@@ -79,102 +89,192 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
             if (followOutput && !scrollState.isScrollInProgress) scrollState.scrollTo(maximum)
         }
     }
+    val openSettings = { viewModel.loadSettings(); viewModel.showSettings(true) }
+    val send = { followOutput = true; keyboard?.hide(); viewModel.submit() }
 
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding()) {
-        if (!compactKeyboard) Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("TouchAI", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
-            TextButton(onClick = viewModel::newChat, enabled = !state.isStreaming && !loadingImage) { Text("New") }
-            TextButton(onClick = { viewModel.loadSettings(); viewModel.showSettings(true) }, enabled = !state.isStreaming && state.ready) { Text("Settings") }
-            onClose?.let { TextButton(onClick = it) { Text("Close") } }
+        if (!compactKeyboard) Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            BrandMark()
+            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+                Text("TouchAI", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                val api = state.selectedAi.api
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(listOfNotNull(api.model.ifBlank { "No model" }, api.reasoningEffort).joinToString(" · "),
+                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    if (api.webSearch) AppIcon(R.drawable.ic_search, "Web search on", Modifier.padding(start = 4.dp), 14.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            AppIconButton(R.drawable.ic_add, "New chat", viewModel::newChat, enabled = !state.isStreaming && !loadingImage)
+            AppIconButton(R.drawable.ic_settings, "Settings", openSettings, enabled = !state.isStreaming && state.ready)
+            onClose?.let { AppIconButton(R.drawable.ic_close, "Close", it) }
         }
-        val selectedAi = state.selectedAi
-        Text(
-            "${selectedAi.api.model.ifBlank { "Configure an AI model in Settings" }} · ${selectedAi.api.reasoningEffort ?: "Default effort"} · Search ${if (selectedAi.api.webSearch) "on" else "off"}",
-            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-            maxLines = 1, overflow = TextOverflow.Ellipsis,
-        )
-        HorizontalDivider()
-        Column(Modifier.weight(1f).fillMaxWidth().verticalScroll(scrollState).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            if (!state.ready) {
-                Text("Loading settings…")
-                if (state.error != null) TextButton(onClick = viewModel::loadSettings) { Text("Retry loading settings") }
-            } else if (state.turns.isEmpty()) {
-                if (!quickAccess.connected || (quickAccess.options.notification && !quickAccess.notificationsAllowed)) {
-                    OutlinedCard(Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(12.dp)) {
-                            Text("Capture from any screen", style = MaterialTheme.typography.titleMedium)
-                            Text("Set up the floating button and quick-access notification.", style = MaterialTheme.typography.bodySmall)
-                            TextButton(onClick = { viewModel.loadSettings(); viewModel.showSettings(true) }) { Text("Set up quick access") }
-                        }
-                    }
+        Box(Modifier.weight(1f).fillMaxWidth()) {
+            when {
+                !state.ready -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    if (state.error == null) CircularProgressIndicator()
+                    else FilledTonalButton(onClick = viewModel::loadSettings) { Text("Retry") }
                 }
-                if (state.imagePreview == null) Text("Choose a preset, edit the message, and Send.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            state.imagePreview?.let { bitmap ->
-                OutlinedCard(Modifier.fillMaxWidth()) {
-                    Box(Modifier.fillMaxWidth()) {
-                        Column(Modifier.fillMaxWidth().clickable { keyboard?.hide(); viewModel.openCrop() }
-                            .semantics { contentDescription = "Crop image" }.padding(12.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                            Image(remember(bitmap) { bitmap.asImageBitmap() }, "Image to send",
-                                Modifier.fillMaxWidth().height(if (compact) 140.dp else 220.dp), contentScale = ContentScale.Fit)
-                            Text("Tap image to crop · sent only with Send", style = MaterialTheme.typography.bodySmall)
-                        }
-                        FilledIconButton(onClick = viewModel::removeImage,
-                            modifier = Modifier.align(Alignment.TopEnd).padding(4.dp).semantics { contentDescription = "Remove image" }) {
-                            Text("×", style = MaterialTheme.typography.headlineSmall)
-                        }
+                state.turns.isEmpty() && state.imagePreview == null -> EmptyState(
+                    showSetup = !quickAccess.connected || (quickAccess.options.notification && !quickAccess.notificationsAllowed),
+                    onSetup = openSettings,
+                )
+                else -> Column(Modifier.fillMaxSize().verticalScroll(scrollState).padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                    state.turns.forEachIndexed { index, turn ->
+                        UserMessage(turn)
+                        AssistantMessage(turn, canRetry = index == state.turns.lastIndex && !state.isStreaming, onRetry = viewModel::retry)
                     }
-                    if (state.preparingImage) LinearProgressIndicator(Modifier.fillMaxWidth())
-                }
-            }
-            state.turns.forEachIndexed { index, turn ->
-                Surface(color = MaterialTheme.colorScheme.surfaceContainer, shape = MaterialTheme.shapes.medium) {
-                    Column(Modifier.fillMaxWidth().padding(12.dp)) {
-                        Text(turn.presetName?.let { "You · $it" } ?: "You", style = MaterialTheme.typography.labelMedium)
-                        SelectionContainer { Text(turn.user.text.ifBlank { "Image request" }) }
-                        if (turn.user.images.isNotEmpty()) Text("Image attached", style = MaterialTheme.typography.labelSmall)
-                    }
-                }
-                Column {
-                    Text("Assistant · ${turn.ai.api.model}", style = MaterialTheme.typography.labelMedium)
-                    turn.searchStatus?.let { Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium) }
-                    if (turn.answer.isEmpty() && turn.status == TurnStatus.Streaming) Text("Waiting for response…", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    val markdown = remember(turn.answer, turn.citations) { citationMarkdown(turn.answer, turn.citations) }
-                    SelectionContainer { StreamingMarkdown(markdown, turn.status == TurnStatus.Streaming, Modifier.fillMaxWidth()) }
-                    turn.citations.distinctBy { it.url }.forEachIndexed { sourceIndex, citation ->
-                        TextButton(onClick = { uriHandler.openUri(citation.url) }, contentPadding = PaddingValues(vertical = 2.dp)) { Text("[${sourceIndex + 1}] ${citation.title}") }
-                    }
-                    if (turn.status == TurnStatus.Stopped) Text("Stopped", style = MaterialTheme.typography.labelMedium)
-                    turn.error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
-                    Row {
-                        if (turn.answer.isNotEmpty()) TextButton(onClick = {
-                            context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("AI response", turn.answer))
-                        }) { Text("Copy") }
-                        if (index == state.turns.lastIndex && !state.isStreaming) TextButton(onClick = viewModel::retry) { Text("Retry") }
+                    state.imagePreview?.let { bitmap ->
+                        Attachment(bitmap, maxHeight = if (compact) 160.dp else if (state.turns.isEmpty()) 440.dp else 280.dp, state.preparingImage, onCrop = { keyboard?.hide(); viewModel.openCrop() }, onRemove = viewModel::removeImage)
                     }
                 }
             }
         }
-        state.error?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = 16.dp)) }
-        HorizontalDivider()
-        Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+        state.error?.let { MessageBanner(it, error = true, modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) }
+        Column(Modifier.padding(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (!compactKeyboard) Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(state.selectedPreset == null, { viewModel.selectPreset(null) }, label = { Text("No preset") }, enabled = !state.isStreaming)
-                state.settings.presets.forEach { preset -> FilterChip(state.selectedPreset == preset.id, { viewModel.selectPreset(preset.id) }, label = { Text(preset.name) }, enabled = !state.isStreaming) }
-            }
-            OutlinedTextField(state.prompt, viewModel::setPrompt, label = { Text("Message") }, modifier = Modifier.fillMaxWidth(),
-                minLines = if (compact) 1 else 2, maxLines = if (compact) 1 else 5, enabled = state.ready && !state.isStreaming,
-                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                keyboardActions = KeyboardActions(onSend = { if (!loadingImage) { followOutput = true; keyboard?.hide(); viewModel.submit() } }))
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                TextButton(onClick = { picker.launch("image/*") }, enabled = state.ready && !state.isStreaming && !loadingImage) {
-                    Text(if (loadingImage) "Loading…" else if (state.originalImage != null) "Replace image" else "Attach image")
+                PresetChip("No preset", state.selectedPreset == null, !state.isStreaming) { viewModel.selectPreset(null) }
+                state.settings.presets.forEach { preset ->
+                    PresetChip(preset.name, state.selectedPreset == preset.id, !state.isStreaming) { viewModel.selectPreset(preset.id) }
                 }
-                Spacer(Modifier.weight(1f))
-                if (state.isStreaming) OutlinedButton(onClick = viewModel::cancel) { Text("Stop") }
-                else Button(onClick = { followOutput = true; keyboard?.hide(); viewModel.submit() }, enabled = state.ready && !loadingImage && !state.preparingImage && (state.originalImage == null || state.image != null)) { Text("Send") }
+            }
+            Surface(color = MaterialTheme.colorScheme.surfaceContainerHigh, shape = MaterialTheme.shapes.extraLarge) {
+                Row(Modifier.padding(4.dp), verticalAlignment = Alignment.Bottom) {
+                    Box(Modifier.padding(bottom = 4.dp)) {
+                        IconButton(onClick = { picker.launch("image/*") }, enabled = state.ready && !state.isStreaming && !loadingImage) {
+                            if (loadingImage) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                            else AppIcon(R.drawable.ic_image, if (state.originalImage != null) "Replace image" else "Attach image")
+                        }
+                    }
+                    TextField(state.prompt, viewModel::setPrompt, placeholder = { Text("Message") }, modifier = Modifier.weight(1f),
+                        minLines = 1, maxLines = if (compact) 2 else 6, enabled = state.ready && !state.isStreaming,
+                        colors = TextFieldDefaults.colors(
+                            focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, disabledContainerColor = Color.Transparent,
+                            focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent, disabledIndicatorColor = Color.Transparent,
+                        ),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+                        keyboardActions = KeyboardActions(onSend = { if (!loadingImage) send() }))
+                    Box(Modifier.padding(bottom = 4.dp)) {
+                        if (state.isStreaming) FilledTonalIconButton(onClick = viewModel::cancel) { AppIcon(R.drawable.ic_stop, "Stop") }
+                        else FilledIconButton(onClick = send,
+                            enabled = state.ready && !loadingImage && !state.preparingImage && (state.originalImage == null || state.image != null)) {
+                            AppIcon(R.drawable.ic_send, "Send", size = 20.dp)
+                        }
+                    }
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun BrandMark(size: Dp = 36.dp) {
+    Box(Modifier.size(size).clip(CircleShape).background(Brush.linearGradient(listOf(Color(0xFF7B6CFF), Color(0xFF3424C4)))),
+        contentAlignment = Alignment.Center) {
+        AppIcon(R.drawable.ic_spark, null, size = size * 0.55f, tint = Color.White)
+    }
+}
+
+@Composable
+private fun EmptyState(showSetup: Boolean, onSetup: () -> Unit) {
+    Column(Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+        Box(Modifier.size(72.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer), contentAlignment = Alignment.Center) {
+            AppIcon(R.drawable.ic_spark, null, size = 36.dp, tint = MaterialTheme.colorScheme.primary)
+        }
+        if (showSetup) {
+            Spacer(Modifier.height(24.dp))
+            FilledTonalButton(onClick = onSetup) { Text("Set up quick access") }
+        }
+    }
+}
+
+@Composable
+private fun PresetChip(label: String, selected: Boolean, enabled: Boolean, onClick: () -> Unit) {
+    FilterChip(selected, onClick, label = { Text(label) }, enabled = enabled, shape = CircleShape,
+        border = if (selected) null else FilterChipDefaults.filterChipBorder(enabled, selected, borderColor = MaterialTheme.colorScheme.outlineVariant))
+}
+
+@Composable
+private fun UserMessage(turn: ChatTurn) {
+    Box(Modifier.fillMaxWidth().padding(start = 48.dp), contentAlignment = Alignment.CenterEnd) {
+        Surface(color = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+            shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp)) {
+            Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                if (turn.presetName != null || turn.user.images.isNotEmpty()) Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    if (turn.user.images.isNotEmpty()) AppIcon(R.drawable.ic_image, "Image attached", size = 14.dp)
+                    turn.presetName?.let { Text(it, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold) }
+                }
+                if (turn.user.text.isNotBlank()) SelectionContainer { Text(turn.user.text, style = MaterialTheme.typography.bodyLarge) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> Unit) {
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            BrandMark(22.dp)
+            Text(turn.ai.api.model, style = MaterialTheme.typography.labelMedium, color = muted, modifier = Modifier.padding(start = 8.dp),
+                maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        turn.searchStatus?.let {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                AppIcon(R.drawable.ic_search, null, size = 14.dp, tint = MaterialTheme.colorScheme.primary)
+                Text(it, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelMedium)
+            }
+        }
+        if (turn.answer.isEmpty() && turn.status == TurnStatus.Streaming) CircularProgressIndicator(Modifier.padding(vertical = 4.dp).size(18.dp), strokeWidth = 2.dp)
+        val markdown = remember(turn.answer, turn.citations) { citationMarkdown(turn.answer, turn.citations) }
+        SelectionContainer { StreamingMarkdown(markdown, turn.status == TurnStatus.Streaming, Modifier.fillMaxWidth()) }
+        val sources = turn.citations.distinctBy { it.url }
+        if (sources.isNotEmpty()) Column {
+            sources.forEachIndexed { sourceIndex, citation ->
+                Row(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).clickable { uriHandler.openUri(citation.url) }.padding(vertical = 6.dp, horizontal = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(Modifier.size(20.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
+                        Text("${sourceIndex + 1}", style = MaterialTheme.typography.labelSmall)
+                    }
+                    Text(citation.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        if (turn.status == TurnStatus.Stopped) Text("Stopped", style = MaterialTheme.typography.labelMedium, color = muted)
+        turn.error?.let { MessageBanner(it, error = true) }
+        if (turn.answer.isNotEmpty() || canRetry) Row(Modifier.offset(x = (-12).dp)) {
+            if (turn.answer.isNotEmpty()) IconButton(onClick = {
+                context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("AI response", turn.answer))
+            }) { AppIcon(R.drawable.ic_copy, "Copy", size = 18.dp, tint = muted) }
+            if (canRetry) IconButton(onClick = onRetry) { AppIcon(R.drawable.ic_refresh, "Retry", size = 18.dp, tint = muted) }
+        }
+    }
+}
+
+@Composable
+private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, onCrop: () -> Unit, onRemove: () -> Unit) {
+    val shape = MaterialTheme.shapes.large
+    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Box {
+            Image(remember(bitmap) { bitmap.asImageBitmap() }, "Image to send",
+                Modifier.heightIn(min = 96.dp, max = maxHeight).widthIn(min = 96.dp)
+                    .clip(shape).background(MaterialTheme.colorScheme.surfaceContainer)
+                    .border(BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant), shape)
+                    .clickable(onClick = onCrop).semantics { contentDescription = "Crop image" },
+                contentScale = ContentScale.Fit)
+            Surface(onClick = onRemove, shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White,
+                modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(28.dp).semantics { contentDescription = "Remove image" }) {
+                Box(contentAlignment = Alignment.Center) { AppIcon(R.drawable.ic_close, null, size = 16.dp) }
+            }
+            Surface(shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).size(28.dp)) {
+                Box(contentAlignment = Alignment.Center) { AppIcon(R.drawable.ic_crop, null, size = 16.dp) }
+            }
+        }
+        if (preparing) LinearProgressIndicator(Modifier.width(96.dp))
     }
 }

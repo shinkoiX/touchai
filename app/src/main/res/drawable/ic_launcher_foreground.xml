@@ -1,0 +1,9 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Capture frame -->
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4.5" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M34,45V40Q34,34 40,34H45M63,34H68Q74,34 74,40V45M74,63V68Q74,74 68,74H63M45,74H40Q34,74 34,68V63" />
+    <!-- Spark -->
+    <path android:fillColor="#FFFFFFFF"
+        android:pathData="M54,42Q55.2,52.8 66,54Q55.2,55.2 54,66Q52.8,55.2 42,54Q52.8,52.8 54,42z" />
+</vector>

@@ -2,11 +2,11 @@ package app.touchai.android
 
 import android.accessibilityservice.AccessibilityService
 import android.annotation.SuppressLint
+import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
-import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.view.Choreographer
 import android.view.Display
@@ -14,11 +14,12 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.ViewOutlineProvider
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityWindowInfo
-import android.widget.TextView
+import android.widget.ImageView
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
@@ -30,7 +31,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 class ScreenCaptureService : AccessibilityService() {
     private val runtime get() = (application as TouchAiApplication).quickAccess
     private val windowManager by lazy { getSystemService(WindowManager::class.java) }
-    private var bubble: TextView? = null
+    private var bubble: ImageView? = null
     private var bubbleVisible = false
     private var capturing = false
     private var options = QuickAccessSettings()
@@ -57,19 +58,18 @@ class ScreenCaptureService : AccessibilityService() {
 
     @SuppressLint("ClickableViewAccessibility") // Taps call performClick; drags only reposition the overlay.
     private fun createBubble() {
-        val view = TextView(this).apply {
-            text = getString(R.string.floating_button_text)
-            textSize = 16f
-            setTextColor(Color.WHITE)
-            typeface = Typeface.DEFAULT_BOLD
-            gravity = Gravity.CENTER
+        val view = ImageView(this).apply {
+            setImageResource(R.drawable.ic_spark)
+            imageTintList = ColorStateList.valueOf(Color.WHITE)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            setPadding(dp(14), dp(14), dp(14), dp(14))
             contentDescription = getString(R.string.floating_button_description)
-            background = GradientDrawable().apply {
+            background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Color.rgb(123, 108, 255), Color.rgb(52, 36, 196))).apply {
                 shape = GradientDrawable.OVAL
-                setColor(Color.rgb(66, 71, 175))
-                setStroke(dp(2), Color.WHITE)
+                setStroke(dp(1), Color.argb(90, 255, 255, 255))
             }
             elevation = dp(6).toFloat()
+            outlineProvider = ViewOutlineProvider.BACKGROUND
             setOnClickListener { if (!capturing) startActivity(CaptureActivity.intent(this@ScreenCaptureService)) }
         }
         val slop = ViewConfiguration.get(this).scaledTouchSlop

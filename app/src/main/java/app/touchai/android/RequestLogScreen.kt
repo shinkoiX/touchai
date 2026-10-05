@@ -5,14 +5,17 @@ import android.content.ClipboardManager
 import android.database.sqlite.SQLiteException
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.touchai.core.openai.RequestLogRecord
@@ -46,41 +49,53 @@ fun RequestLogScreen(store: RequestLogStore, onClose: () -> Unit) {
         finally { loading = false }
     }
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp), horizontalArrangement = Arrangement.SpaceBetween) {
-            TextButton(onClick = onClose) { Text("Back") }
-            TextButton(onClick = { refresh++ }) { Text("Refresh") }
-            TextButton(onClick = { confirmClear = true }, enabled = entries.isNotEmpty()) { Text("Clear logs") }
+        AppTopBar("Request logs", navigation = { AppIconButton(R.drawable.ic_back, "Back", onClose) }) {
+            AppIconButton(R.drawable.ic_refresh, "Refresh", { refresh++ })
+            AppIconButton(R.drawable.ic_delete, "Clear logs", { confirmClear = true }, enabled = entries.isNotEmpty())
         }
-        Text("Request logs", style = MaterialTheme.typography.headlineMedium, modifier = Modifier.padding(horizontal = 16.dp))
-        Text("Stored on this device until cleared. Includes sent messages and instructions; excludes API keys and image data.",
-            style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(16.dp))
-        (readError ?: storageError)?.let { Text(it, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
         if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
-        LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (!loading && entries.isEmpty()) item { Text("No requests recorded yet.") }
+        (readError ?: storageError)?.let { MessageBanner(it, error = true, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
+        if (!loading && entries.isEmpty()) Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+            Text("No requests yet", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        } else LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(entries.take(limit), key = { it.id }) { entry ->
-                OutlinedCard(onClick = { expanded = if (expanded == entry.id) null else entry.id }, modifier = Modifier.fillMaxWidth()) {
-                    Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                        Text("${entry.status} · ${entry.data.getValue("purpose").jsonPrimitive.content}", style = MaterialTheme.typography.titleMedium)
-                        Text(dateFormat.format(Date(entry.startedAt)), style = MaterialTheme.typography.labelMedium)
+                Surface(onClick = { expanded = if (expanded == entry.id) null else entry.id }, modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.large) {
+                    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            StatusPill(entry.status)
+                            Text(entry.data.getValue("purpose").jsonPrimitive.content, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                            Text(dateFormat.format(Date(entry.startedAt)), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                         Text(entry.data.getValue("model").jsonPrimitive.content, style = MaterialTheme.typography.bodyMedium)
                         val duration = entry.data["durationMillis"]?.jsonPrimitive?.content?.let { " · ${it} ms" }.orEmpty()
-                        Text("${entry.data.getValue("messageCount")} messages · ${entry.data.getValue("imageCount")} images$duration", style = MaterialTheme.typography.bodySmall)
+                        Text("${entry.data.getValue("messageCount")} messages · ${entry.data.getValue("imageCount")} images$duration",
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         if (expanded == entry.id) {
                             val text = remember(entry) { json.encodeToString(JsonObject.serializer(), entry.json()) }
-                            TextButton(onClick = {
-                                context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Request log", text))
-                            }) { Text("Copy log") }
-                            SelectionContainer { Text(text, style = MaterialTheme.typography.bodySmall) }
-                        } else Text("Tap for details", style = MaterialTheme.typography.labelSmall)
+                            Surface(color = MaterialTheme.colorScheme.surfaceContainerHighest, shape = MaterialTheme.shapes.medium) {
+                                Box {
+                                    SelectionContainer {
+                                        Text(text, style = MaterialTheme.typography.bodySmall, fontFamily = FontFamily.Monospace,
+                                            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, top = 12.dp, bottom = 12.dp, end = 48.dp))
+                                    }
+                                    Box(Modifier.align(Alignment.TopEnd)) {
+                                        AppIconButton(R.drawable.ic_copy, "Copy log", {
+                                            context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("Request log", text))
+                                        })
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
-            if (entries.size > limit) item { OutlinedButton(onClick = { limit += 100 }) { Text("Load older") } }
+            if (entries.size > limit) item {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { TextButton(onClick = { limit += 100 }) { Text("Load older") } }
+            }
         }
     }
     if (confirmClear) AlertDialog(onDismissRequest = { confirmClear = false }, title = { Text("Clear request logs?") },
-        text = { Text("This deletes all stored request logs from this device.") },
         confirmButton = { TextButton(onClick = {
             confirmClear = false
             scope.launch {
@@ -89,4 +104,17 @@ fun RequestLogScreen(store: RequestLogStore, onClose: () -> Unit) {
             }
         }) { Text("Clear") } },
         dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancel") } })
+}
+
+@Composable
+private fun StatusPill(status: String) {
+    val colors = MaterialTheme.colorScheme
+    val (background, content) = when (status) {
+        "Completed" -> colors.primaryContainer to colors.onPrimaryContainer
+        "Failed" -> colors.errorContainer to colors.onErrorContainer
+        else -> colors.secondaryContainer to colors.onSecondaryContainer
+    }
+    Surface(color = background, contentColor = content, shape = CircleShape) {
+        Text(status, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 10.dp, vertical = 3.dp))
+    }
 }

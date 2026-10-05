@@ -1,5 +1,7 @@
 <resources>
-    <style name="Theme.TouchAI" parent="android:style/Theme.DeviceDefault.Light.NoActionBar" />
+    <style name="Theme.TouchAI" parent="android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
     <style name="Theme.TouchAI.Capture" parent="Theme.TouchAI">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>

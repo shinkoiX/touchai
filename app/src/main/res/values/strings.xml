@@ -1,7 +1,6 @@
 <resources>
     <string name="app_name">TouchAI</string>
-    <string name="floating_button_text">AI</string>
     <string name="floating_button_description">Ask AI about this screen</string>
     <string name="accessibility_service_label">TouchAI screen capture</string>
-    <string name="accessibility_service_description">TouchAI uses accessibility to show a floating button and take a screenshot only when you invoke it. You review, crop, or remove the image before sending it to your configured AI provider. It does not click or type in other apps.</string>
+    <string name="accessibility_service_description">Shows a floating button and takes a screenshot only when you tap it. Nothing is sent until you press Send. TouchAI does not click or type in other apps.</string>
 </resources>
