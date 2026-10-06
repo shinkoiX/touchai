@@ -2,6 +2,7 @@ package app.touchai.android
 
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import app.touchai.core.openai.ApiProtocol
+import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.OpenAIModelConfig
 import java.util.Base64
 import javax.crypto.AEADBadTagException
@@ -16,6 +17,25 @@ class SettingsPersistenceTest {
     @get:Rule val temporaryFolder = TemporaryFolder()
     private val key = KeyGenerator.getInstance("AES").apply { init(256) }.generateKey()
     private val cipher = ApiKeyCipher { key }
+
+    @Test fun defaultAndPresetOAuthAccountsPersistWithoutAnApiKey() = runBlocking {
+        val file = temporaryFolder.newFolder().resolve("oauth.preferences_pb")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val data = PreferenceDataStoreFactory.create(scope = scope) { file }
+            val api = OpenAIModelConfig(authentication = AuthenticationMethod.ChatGpt, chatGptAccountId = "account-one",
+                protocol = ApiProtocol.Responses, model = "available")
+            val settings = AppSettings(api = api, presets = listOf(PromptPreset("custom", "Custom", "Explain",
+                AiConfiguration(api.copy(chatGptAccountId = "account-two")))))
+            DataStoreSettingsRepository(data, cipher).save(settings)
+            val loaded = DataStoreSettingsRepository(data, cipher).load()
+            assertEquals(api, loaded.api)
+            assertEquals(settings.presets, loaded.presets)
+            assertNull(apiError(api, requireCredentials = true))
+            assertNotNull(apiError(api.copy(chatGptAccountId = null), requireCredentials = true))
+            assertNotNull(apiError(api.copy(baseUrl = "https://other.example.com"), requireCredentials = true))
+        } finally { scope.coroutineContext[Job]!!.cancelAndJoin() }
+    }
 
     @Test fun settingsSurviveRepositoryRecreationWithoutStoringThePlainApiKey() = runBlocking {
         val file = temporaryFolder.newFolder().resolve("settings.preferences_pb")

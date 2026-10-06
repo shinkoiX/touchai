@@ -49,6 +49,23 @@ class OpenAIModelStreamTest {
         }) }
     }.toString())
 
+    @Test fun responsesStreamWithoutAContentTypeHeaderStillRequiresAndAcceptsCompletion() = runBlocking {
+        server.enqueue(MockResponse().setChunkedBody(
+            sse("""{"type":"response.output_text.delta","delta":"OK"}""") +
+                sse("""{"type":"response.completed","response":{"status":"completed","model":"test"}}"""), 7))
+        val result = model.complete(config(ApiProtocol.Responses), request)
+        assertEquals("OK", result.text)
+        assertEquals("completed", result.response.getValue("status").jsonPrimitive.content)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun aHeaderlessNonStreamIsNotMistakenForACompletedAnswer() = runBlocking {
+        server.enqueue(MockResponse().setBody("""{"error":{"message":"Not a stream"}}"""))
+        val failure = runCatching { model.complete(config(ApiProtocol.Responses), request) }.exceptionOrNull()
+        assertTrue(failure is ResponseInterruptedException)
+        assertEquals(1, server.requestCount)
+    }
+
     @Test fun interruptedBackgroundStreamRetrievesTheSameResponseWithoutAnotherPost() = runBlocking {
         enqueue(sse("""{"type":"response.created","response":{"id":"resp_saved","background":true}}""") +
             sse("""{"type":"response.output_text.delta","delta":"Partial"}"""))

@@ -8,6 +8,8 @@ enum class ApiProtocol(val label: String, val path: String) {
     Responses("Responses", "responses"),
 }
 
+enum class AuthenticationMethod(val label: String) { ApiKey("API key"), ChatGpt("ChatGPT") }
+
 data class OpenAIModelConfig(
     val apiKey: String = "",
     val model: String = "",
@@ -17,7 +19,12 @@ data class OpenAIModelConfig(
     val webSearch: Boolean = true,
     val timeoutMillis: Long = 120_000L,
     val backgroundResponses: Boolean = false,
-)
+    val authentication: AuthenticationMethod = AuthenticationMethod.ApiKey,
+    val chatGptAccountId: String? = null,
+) {
+    val requestProtocol: ApiProtocol get() = if (authentication == AuthenticationMethod.ChatGpt) ApiProtocol.Responses else protocol
+    val recoverResponses: Boolean get() = authentication == AuthenticationMethod.ApiKey && backgroundResponses
+}
 
 data class OpenAIImage(val url: String, val detail: String = "auto")
 data class GeneratedImage(val id: String, val image: OpenAIImage)
@@ -74,12 +81,13 @@ class UserRequestedCancellation(val response: JsonObject? = null) : kotlinx.coro
 data class ResponseOutput(val text: String, val images: List<GeneratedImage>, val citations: List<WebCitation>)
 
 fun buildRequestUrl(config: OpenAIModelConfig): String =
-    "${config.baseUrl.trimEnd('/')}/${config.protocol.path}"
+    if (config.authentication == AuthenticationMethod.ChatGpt) "${ChatGptOAuth.Resource}/responses"
+    else "${config.baseUrl.trimEnd('/')}/${config.protocol.path}"
 
 fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest): JsonObject = buildJsonObject {
     put("model", config.model)
     put("stream", true)
-    when (config.protocol) {
+    when (config.requestProtocol) {
         ApiProtocol.ChatCompletions -> {
             putJsonArray("messages") {
                 if (request.instructions.isNotBlank()) add(buildJsonObject {
@@ -111,8 +119,8 @@ fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest): JsonObj
             if (config.webSearch) putJsonObject("web_search_options") { }
         }
         ApiProtocol.Responses -> {
-            put("store", config.backgroundResponses)
-            if (config.backgroundResponses) put("background", true)
+            put("store", config.recoverResponses)
+            if (config.recoverResponses) put("background", true)
             if (request.instructions.isNotBlank()) put("instructions", request.instructions)
             putJsonArray("input") {
                 request.messages.forEach { message -> add(buildJsonObject {

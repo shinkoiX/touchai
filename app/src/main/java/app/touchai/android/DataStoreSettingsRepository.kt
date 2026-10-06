@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import app.touchai.core.openai.ApiProtocol
+import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.OpenAIModelConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -33,6 +34,8 @@ class DataStoreSettingsRepository(
                 reasoningEffort = prefs[Effort]?.takeIf(String::isNotEmpty),
                 webSearch = prefs[WebSearch] ?: true,
                 backgroundResponses = prefs[BackgroundResponses] ?: false,
+                authentication = prefs[Authentication]?.let(AuthenticationMethod::valueOf) ?: AuthenticationMethod.ApiKey,
+                chatGptAccountId = prefs[ChatGptAccountId]?.takeIf(String::isNotBlank),
             ),
             instructions = prefs[Instructions] ?: "",
             presets = prefs[Presets]?.let { serialized ->
@@ -68,6 +71,8 @@ class DataStoreSettingsRepository(
             prefs[Effort] = settings.api.reasoningEffort ?: ""
             prefs[WebSearch] = settings.api.webSearch
             prefs[BackgroundResponses] = settings.api.backgroundResponses
+            prefs[Authentication] = settings.api.authentication.name
+            prefs[ChatGptAccountId] = settings.api.chatGptAccountId.orEmpty()
             prefs[Instructions] = settings.instructions
             prefs[Presets] = presets
             val selected = prefs[LastPreset] ?: AppSettings().lastPresetId
@@ -112,6 +117,8 @@ class DataStoreSettingsRepository(
         api.reasoningEffort?.let { put("effort", it) }
         put("webSearch", api.webSearch)
         put("backgroundResponses", api.backgroundResponses)
+        put("authentication", api.authentication.name)
+        api.chatGptAccountId?.let { put("chatGptAccountId", it) }
         put("instructions", configuration.instructions)
     }
 
@@ -124,6 +131,8 @@ class DataStoreSettingsRepository(
             reasoningEffort = value["effort"]?.jsonPrimitive?.content,
             webSearch = value.getValue("webSearch").jsonPrimitive.boolean,
             backgroundResponses = value["backgroundResponses"]?.jsonPrimitive?.boolean ?: false,
+            authentication = value["authentication"]?.jsonPrimitive?.content?.let(AuthenticationMethod::valueOf) ?: AuthenticationMethod.ApiKey,
+            chatGptAccountId = value["chatGptAccountId"]?.jsonPrimitive?.content,
         ),
         instructions = value.getValue("instructions").jsonPrimitive.content,
     )
@@ -136,6 +145,8 @@ class DataStoreSettingsRepository(
         val Effort = stringPreferencesKey("reasoning_effort")
         val WebSearch = booleanPreferencesKey("web_search")
         val BackgroundResponses = booleanPreferencesKey("background_responses")
+        val Authentication = stringPreferencesKey("authentication")
+        val ChatGptAccountId = stringPreferencesKey("chatgpt_account_id")
         val Instructions = stringPreferencesKey("instructions")
         val Presets = stringPreferencesKey("presets")
         // Keep the existing selection slot; it now tracks the most recent choice.

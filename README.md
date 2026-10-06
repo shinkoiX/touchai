@@ -11,8 +11,10 @@ Android 11 or later and is intended for personal use as a sideloaded APK.
    require **App info → Allow restricted settings** for a sideloaded installation.
 3. Allow notifications. Enable the floating button, the quick-access notification,
    or both, then Save. The floating button appears when you leave TouchAI.
-4. Configure the default AI endpoint, API key, model ID, reasoning effort, general
-   instructions, and web search. Use Test connection to check the configuration.
+4. In **Default AI**, choose **API key** or **ChatGPT**. Configure the endpoint and
+   API key, or use **Continue with ChatGPT** and select an available model. Set
+   reasoning effort, general instructions, and web search. Use Test connection
+   to check the configuration.
 5. Edit the presets. Each preset can use the default AI configuration or its own
    endpoint, API key, protocol, model, reasoning effort, instructions, and search
    setting. Use the up/down arrows beside each preset to reorder them, then Save.
@@ -118,6 +120,52 @@ retention period. See the [Responses background API](https://developers.openai.c
 and [Android foreground-service limits](https://developer.android.com/develop/background-work/services/fgs/timeout).
 
 ## AI configuration and web search
+
+### Sign in with ChatGPT
+
+Choose **ChatGPT → Continue with ChatGPT** in the default AI configuration or a
+custom preset. Complete authorization in the in-app browser (Android Custom Tab),
+close the browser tab, choose a model, and Save. An eligible ChatGPT plan and permission to use it are
+required. **Add account** creates another account/workspace registration; the
+account picker preserves separate registrations even when they share an email.
+**Usage** opens ChatGPT's usage settings. **Sign out** stops that account's active
+requests, attempts remote session revocation, and clears its local tokens.
+
+A temporary **Signing in to ChatGPT** foreground notification keeps the local
+callback listener active while the browser is open. Without it, Android can
+freeze the app and leave consent waiting on an unanswered loopback request.
+The service stops when sign-in completes, fails, is cancelled, or reaches its
+five-minute authorization timeout. Its notification also provides **Cancel**.
+
+This uses OpenAI's [official public-client OAuth flow](https://developers.openai.com/siwc/token-sharing-open-source/sign-in):
+dynamic client registration, PKCE, state/nonce checks, a device-only loopback
+callback, and ID-token signature/issuer/audience validation. It needs no client
+secret or manually configured client ID. Tokens are encrypted with Android
+Keystore, refreshed before expiry, and kept separate from chat history. Each
+installation retains a stable opaque host ID. Signing out keeps the registration
+for later sign-in. No ChatGPT cookies or credentials from another app are used.
+
+OAuth requests use `https://api.openai.com/v1/responses`, with `stream: true` and
+`store: false`. The model picker loads the signed-in account's current catalog.
+The **Model** field also accepts an explicit model ID, since the catalog may omit
+models that the account can still invoke. The dropdown shows the models OpenAI
+marks for display; an unavailable manually entered ID produces the API's error.
+Text, screenshots, local conversation context, instructions, and supported web
+search use the same request/streaming implementation as Responses with an API key.
+Retries obtain a current token for the turn's original saved account. Portable
+history exports exclude account bindings as well as credentials; imported retries
+use a ChatGPT account selected in current settings.
+
+OAuth is **not equivalent to unrestricted API-key access**: ChatGPT plan usage and
+limits apply, available models can differ, and it does not expose ChatGPT chats or
+memory. The current [preview limitations](https://developers.openai.com/siwc/token-sharing-open-source/preview-limitations)
+exclude background recovery, image generation, audio/transcription, and several
+hosted tools. Recovery controls are therefore unavailable for ChatGPT configurations.
+For the same supported model, inputs, and options, the authentication method alone
+does not imply identical answer text. API-key configurations keep their existing
+provider, protocol, and feature options.
+
+### API keys
 
 Provide an HTTPS base URL including any version prefix, without the endpoint:
 

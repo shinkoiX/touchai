@@ -28,5 +28,6 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.ktor.client.okhttp)
+    testImplementation(libs.ktor.client.mock)
     testImplementation(libs.okhttp.mockwebserver)
 }

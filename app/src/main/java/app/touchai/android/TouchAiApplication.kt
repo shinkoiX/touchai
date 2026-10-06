@@ -8,6 +8,7 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import app.touchai.core.openai.OpenAIModel
 import app.touchai.core.openai.LoggingChatClient
+import app.touchai.core.openai.ChatGptOAuth
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
@@ -47,12 +48,13 @@ class TouchAiApplication : Application() {
         HttpClient(OkHttp) {
             expectSuccess = false
             followRedirects = false
-            install(HttpTimeout) { connectTimeoutMillis = 15_000; socketTimeoutMillis = 120_000 }
+            install(HttpTimeout) { requestTimeoutMillis = 30_000; connectTimeoutMillis = 15_000; socketTimeoutMillis = 120_000 }
             engine { config { retryOnConnectionFailure(false) } }
         }
     }
     private val responseClient by lazy { OpenAIModel(httpClient) }
-    private val chatClient by lazy { LoggingChatClient(responseClient, requestLogs) }
+    val chatGptAccounts by lazy { ChatGptAccountManager(ChatGptAccountStore(settingsDataStore, ApiKeyCipher()), ChatGptOAuth(httpClient)) }
+    private val chatClient by lazy { ChatGptChatClient(LoggingChatClient(responseClient, requestLogs), chatGptAccounts) }
     val requests by lazy {
         ChatRequestRunner(chatHistory, chatClient, responseClient::cancelResponse, requestScope,
             onWorkStarted = { RequestService.start(this) },

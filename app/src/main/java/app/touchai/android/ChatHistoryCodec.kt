@@ -26,6 +26,8 @@ internal fun encodeChatTurn(turn: ChatTurn, encryptedApiKey: String? = null) = b
         put("protocol", api.protocol.name); put("reasoningEffort", api.reasoningEffort); put("webSearch", api.webSearch)
         put("timeoutMillis", api.timeoutMillis); put("instructions", turn.ai.instructions)
         put("backgroundResponses", api.backgroundResponses)
+        put("authentication", api.authentication.name)
+        if (encryptedApiKey != null) api.chatGptAccountId?.let { put("chatGptAccountId", it) }
     }
 }
 
@@ -41,6 +43,8 @@ internal fun decodeChatTurn(value: JsonObject, apiKey: String): ChatTurn {
             protocol = ApiProtocol.valueOf(ai.string("protocol")), reasoningEffort = ai.optionalString("reasoningEffort"),
             webSearch = ai.getValue("webSearch").jsonPrimitive.boolean, timeoutMillis = ai.getValue("timeoutMillis").jsonPrimitive.long,
             backgroundResponses = ai["backgroundResponses"]?.jsonPrimitive?.boolean ?: false,
+            authentication = ai["authentication"]?.jsonPrimitive?.content?.let(AuthenticationMethod::valueOf) ?: AuthenticationMethod.ApiKey,
+            chatGptAccountId = ai["chatGptAccountId"]?.jsonPrimitive?.content,
         ), ai.string("instructions")),
         presetName = value.optionalString("presetName"), answer = value.string("answer"),
         status = status,

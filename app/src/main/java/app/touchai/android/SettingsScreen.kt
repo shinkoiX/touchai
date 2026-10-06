@@ -18,6 +18,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.touchai.core.openai.ApiProtocol
+import app.touchai.core.openai.AuthenticationMethod
+import app.touchai.core.openai.ChatGptOAuth
 import app.touchai.core.openai.OpenAIModelConfig
 import java.util.UUID
 
@@ -145,14 +147,24 @@ private fun <T> Choices(options: List<T>, selected: (T) -> Boolean, label: (T) -
 private fun AiConfigurationEditor(value: AiConfiguration, onChange: (AiConfiguration) -> Unit) {
     fun api(change: (OpenAIModelConfig) -> OpenAIModelConfig) = onChange(value.copy(api = change(value.api)))
     Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        OutlinedTextField(value.api.baseUrl, { url -> api { it.copy(baseUrl = url) } }, label = { Text("Base URL") },
-            placeholder = { Text("https://api.example.com/v1") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false))
-        Choices(ApiProtocol.entries, { it == value.api.protocol }, { it.label }) { protocol -> api { it.copy(protocol = protocol) } }
-        OutlinedTextField(value.api.apiKey, { key -> api { it.copy(apiKey = key) } }, label = { Text("API key") }, visualTransformation = PasswordVisualTransformation(),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false), singleLine = true, modifier = Modifier.fillMaxWidth())
-        OutlinedTextField(value.api.model, { model -> api { it.copy(model = model) } }, label = { Text("Model") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false))
+        Choices(AuthenticationMethod.entries, { it == value.api.authentication }, { it.label }) { method ->
+            if (method != value.api.authentication) api {
+                it.copy(authentication = method, apiKey = "", model = "", chatGptAccountId = null,
+                    baseUrl = ChatGptOAuth.Resource, protocol = ApiProtocol.Responses, backgroundResponses = false)
+            }
+        }
+        if (value.api.authentication == AuthenticationMethod.ChatGpt) {
+            ChatGptConfiguration(value.api) { configuration -> onChange(value.copy(api = configuration)) }
+        } else {
+            OutlinedTextField(value.api.baseUrl, { url -> api { it.copy(baseUrl = url) } }, label = { Text("Base URL") },
+                placeholder = { Text("https://api.example.com/v1") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false))
+            Choices(ApiProtocol.entries, { it == value.api.protocol }, { it.label }) { protocol -> api { it.copy(protocol = protocol) } }
+            OutlinedTextField(value.api.apiKey, { key -> api { it.copy(apiKey = key) } }, label = { Text("API key") }, visualTransformation = PasswordVisualTransformation(),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false), singleLine = true, modifier = Modifier.fillMaxWidth())
+            OutlinedTextField(value.api.model, { model -> api { it.copy(model = model) } }, label = { Text("Model") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false))
+        }
         Text("Reasoning effort", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         val efforts = listOf(null, "low", "medium", "high")
         Choices(efforts, { it == value.api.reasoningEffort }, { it?.replaceFirstChar(Char::uppercase) ?: "Default" }) { effort ->
@@ -163,6 +175,6 @@ private fun AiConfigurationEditor(value: AiConfiguration, onChange: (AiConfigura
         OutlinedTextField(value.instructions, { onChange(value.copy(instructions = it)) }, label = { Text("Instructions") }, minLines = 2, modifier = Modifier.fillMaxWidth())
     }
     SwitchRow("Web search", value.api.webSearch, { search -> api { it.copy(webSearch = search) } })
-    if (value.api.protocol == ApiProtocol.Responses) SwitchRow("Recover interrupted responses", value.api.backgroundResponses,
+    if (value.api.authentication == AuthenticationMethod.ApiKey && value.api.protocol == ApiProtocol.Responses) SwitchRow("Recover interrupted responses", value.api.backgroundResponses,
         { enabled -> api { it.copy(backgroundResponses = enabled) } })
 }

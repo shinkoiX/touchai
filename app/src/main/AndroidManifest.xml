@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
     <application
         android:name=".TouchAiApplication"
@@ -26,6 +27,9 @@
             </intent-filter>
         </activity>
         <activity
+            android:name=".ChatGptSignInActivity"
+            android:exported="false" />
+        <activity
             android:name=".CaptureActivity"
             android:windowSoftInputMode="adjustResize"
             android:exported="false"
@@ -33,6 +37,15 @@
             android:launchMode="singleTask"
             android:taskAffinity="${applicationId}.capture"
             android:theme="@style/Theme.TouchAI.Capture" />
+        <service
+            android:name=".ChatGptSignInService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:stopWithTask="true">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Keep the on-device OAuth loopback listener active during user-initiated ChatGPT browser sign-in. Stops on completion, cancellation, or the five-minute authorization timeout." />
+        </service>
         <service
             android:name=".RequestService"
             android:exported="false"

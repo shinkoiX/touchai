@@ -28,6 +28,7 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
             request.presetName?.let { put("preset", it) }
             put("endpoint", buildRequestUrl(config))
             put("protocol", config.protocol.label)
+            put("authentication", config.authentication.label)
             put("model", config.model)
             config.reasoningEffort?.let { put("reasoningEffort", it) }
             put("webSearch", config.webSearch)
@@ -132,7 +133,7 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
 internal fun redactLogCredentials(value: JsonElement, apiKey: String): JsonElement = when (value) {
     is JsonObject -> JsonObject(value.mapValues { (key, item) ->
         if (key.lowercase().replace("_", "").replace("-", "") in setOf(
-                "authorization", "apikey", "accesstoken", "refreshtoken", "password", "secret", "cookie", "setcookie")) JsonPrimitive("[REDACTED]")
+                "authorization", "apikey", "accesstoken", "refreshtoken", "idtoken", "password", "secret", "cookie", "setcookie")) JsonPrimitive("[REDACTED]")
         else redactLogCredentials(item, apiKey)
     })
     is JsonArray -> JsonArray(value.map { redactLogCredentials(it, apiKey) })

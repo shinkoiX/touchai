@@ -38,6 +38,7 @@ class ChatHistoryArchive(private val history: ChatHistoryRepository) {
                 val turns = value.getValue("turns").jsonArray.map { serialized ->
                     val decoded = decodeChatTurn(serialized.jsonObject, apiKey = "")
                     val turn = decoded.copy(responseId = null, cancelRequested = false,
+                        ai = decoded.ai.copy(api = decoded.ai.api.copy(chatGptAccountId = null)),
                         status = if (decoded.isRunning) TurnStatus.Interrupted else decoded.status)
                     require(apiError(turn.ai.api, requireCredentials = false) == null) { "A chat contains an invalid AI endpoint." }
                     require(turn.ai.api.timeoutMillis > 0) { "A chat contains an invalid request timeout." }

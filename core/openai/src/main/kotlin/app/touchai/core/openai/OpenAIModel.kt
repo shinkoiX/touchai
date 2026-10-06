@@ -32,11 +32,11 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                 if (error is CancellationException) throw error
                 if (error !is IOException && error !is HttpRequestTimeoutException && error !is ResponseInterruptedException) throw error
                 val id = responseId
-                if (id != null && config.backgroundResponses) {
+                if (id != null && config.recoverResponses) {
                     emit(OpenAIStreamEvent.RecoveryStatus("Reconnecting…"))
                     pollResponse(config, id)
                 } else throw ResponseInterruptedException(
-                    if (config.backgroundResponses) "Connection interrupted before a response ID was received. The request cannot be recovered safely."
+                    if (config.recoverResponses) "Connection interrupted before a response ID was received. The request cannot be recovered safely."
                     else "Connection interrupted. This request does not support server-side recovery.", error)
             })
         }
@@ -63,7 +63,8 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                 }
                 throw OpenAIRequestException("HTTP ${response.status.value}: ${message ?: response.status.description}", response.status.value)
             }
-            if (response.contentType()?.match(ContentType.Text.EventStream) != true) {
+            val responseType = response.contentType()
+            if (responseType != null && !responseType.match(ContentType.Text.EventStream)) {
                 emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(response.bodyAsText())))
                 throw OpenAIStreamException("The endpoint did not return an event stream. Check the API protocol.")
             }
@@ -87,14 +88,14 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                         throw error
                     }
                     emit(OpenAIStreamEvent.ResponsePayload(payload))
-                    if (config.protocol == ApiProtocol.Responses && config.backgroundResponses && responseId == null) {
+                    if (config.requestProtocol == ApiProtocol.Responses && config.recoverResponses && responseId == null) {
                         (payload["response"] as? JsonObject)?.string("id")?.let {
                             responseId = it
                             onCheckpoint(it)
                             emit(OpenAIStreamEvent.ResponseCheckpoint(it))
                         }
                     }
-                    val decoded = decodeStreamPayload(config.protocol, payload, event.name)
+                    val decoded = decodeStreamPayload(config.requestProtocol, payload, event.name)
                     decoded.deltas.forEach { receivedText.append(it); emit(OpenAIStreamEvent.TextDelta(it)) }
                     decoded.finalText?.let { finalText ->
                         if (finalText.startsWith(receivedText.toString()) && finalText.length > receivedText.length) {

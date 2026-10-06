@@ -341,8 +341,13 @@ class OpenAIChatViewModel(
         if (snapshot.isStreaming || snapshot.turns.isEmpty() || snapshot.savingSettings) return
         val original = snapshot.turns.last().ai.api
         val configurations = listOf(snapshot.settings.api) + snapshot.settings.presets.mapNotNull { it.customAi?.api }
-        val api = if (original.apiKey.isNotBlank()) original else original.copy(apiKey = configurations.firstOrNull {
-            it.apiKey.isNotBlank() && it.baseUrl.trimEnd('/') == original.baseUrl.trimEnd('/') && it.protocol == original.protocol
+        val api = if (original.authentication == AuthenticationMethod.ChatGpt) original.copy(
+            chatGptAccountId = original.chatGptAccountId ?: configurations.firstOrNull {
+                it.authentication == AuthenticationMethod.ChatGpt && it.chatGptAccountId != null
+            }?.chatGptAccountId,
+        ) else if (original.apiKey.isNotBlank()) original else original.copy(apiKey = configurations.firstOrNull {
+            it.authentication == AuthenticationMethod.ApiKey && it.apiKey.isNotBlank() &&
+                it.baseUrl.trimEnd('/') == original.baseUrl.trimEnd('/') && it.protocol == original.protocol
         }?.apiKey.orEmpty())
         val error = apiError(api, requireCredentials = true)
         if (error != null) { reportError(error); return }
@@ -404,6 +409,13 @@ internal fun settingsError(settings: AppSettings): String? {
 }
 
 internal fun apiError(api: OpenAIModelConfig, requireCredentials: Boolean): String? {
+    if (api.authentication == AuthenticationMethod.ChatGpt) return when {
+        api.baseUrl != ChatGptOAuth.Resource || api.protocol != ApiProtocol.Responses || api.backgroundResponses || api.apiKey.isNotEmpty() ->
+            "ChatGPT requires the official Responses endpoint without background recovery or an API key."
+        requireCredentials && api.chatGptAccountId.isNullOrBlank() -> "Select a ChatGPT account in Settings."
+        requireCredentials && api.model.isBlank() -> "Select a ChatGPT model in Settings."
+        else -> null
+    }
     val uri = try { URI(api.baseUrl) } catch (_: URISyntaxException) { return "Enter a valid API base URL." }
     return when {
         uri.scheme != "https" || uri.host.isNullOrBlank() -> "Use an HTTPS API base URL, including its version path."
