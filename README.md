@@ -5,12 +5,14 @@ Android 11 or later and is intended for personal use as a sideloaded APK.
 
 ## Start using it
 
-1. Install `app/build/outputs/apk/debug/app-debug.apk` and open TouchAI.
+1. Install the signed APK from this repository's **Releases** page and open TouchAI.
+   For local development, build and install `app/build/outputs/apk/debug/app-debug.apk`.
 2. In **Settings → Quick access**, select **Enable** next to Screen capture, then enable
    **TouchAI screen capture** in Android Accessibility settings. Android may first
    require **App info → Allow restricted settings** for a sideloaded installation.
-3. Allow notifications. Enable the floating button, the quick-access notification,
-   or both, then Save. The floating button appears when you leave TouchAI.
+3. Choose a corner gesture, the floating button, the quick-access notification,
+   or a combination, then Save. Allow notifications if using notification access.
+   The gesture area and floating button appear when you leave TouchAI.
 4. In **Default AI**, choose **API key** or **ChatGPT**. Configure the endpoint and
    API key, or use **Continue with ChatGPT** and select an available model. Set
    reasoning effort, general instructions, and web search. Use Test connection
@@ -318,8 +320,3 @@ portrait/landscape transitions. Android's legacy `uiautomator dump` can temporar
 suspend accessibility services; avoid using it during capture verification.
 Instrumentation can also leave a previously enabled accessibility service awaiting
 reconnection; toggle it off and on in Android settings after testing if necessary.
-
-`core/openai` and `core/markdown` were adapted from the Android components in
-`ai-using`. The imported toolchain versions are retained; lint may report available
-SDK and dependency updates. A specific provider's image, reasoning, and search
-capabilities still need to be verified with that provider's configuration.
