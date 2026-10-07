@@ -386,6 +386,8 @@ class OpenAIChatViewModelTest {
     }
 
     @Test fun invalidSettingsAreRejectedAtTheUserInputBoundary() {
+        assertNotNull(settingsError(settings.copy(quickAccess = QuickAccessSettings(cornerSwipe = true, cornerGestures = emptySet()))))
+        assertNull(settingsError(settings.copy(quickAccess = QuickAccessSettings(cornerSwipe = false, cornerGestures = emptySet()))))
         assertNotNull(settingsError(settings.copy(api = settings.api.copy(baseUrl = "http://example.com/v1"))))
         assertNotNull(settingsError(settings.copy(api = settings.api.copy(baseUrl = "https://user:secret@example.com/v1"))))
         assertNotNull(settingsError(settings.copy(api = settings.api.copy(baseUrl = "https://example.com/v1/responses"))))

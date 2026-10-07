@@ -400,6 +400,7 @@ private fun OpenAIModelConfig.normalized() = copy(baseUrl = baseUrl.trim().trimE
     reasoningEffort = reasoningEffort?.trim()?.takeIf(String::isNotEmpty))
 
 internal fun settingsError(settings: AppSettings): String? {
+    if (settings.quickAccess.cornerSwipe && settings.quickAccess.cornerGestures.isEmpty()) return "Select at least one corner gesture."
     apiError(settings.api, requireCredentials = false)?.let { return "Default AI: $it" }
     settings.presets.forEach { preset ->
         if (preset.name.isBlank() || preset.prompt.isBlank()) return "Each preset needs a name and prompt."

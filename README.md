@@ -23,6 +23,29 @@ Android 11 or later and is intended for personal use as a sideloaded APK.
 
 Tap the floating button or the notification's **Ask AI** action. TouchAI captures
 once, then opens the send panel with the full screenshot attached by default.
+Enable **Settings → Quick access → Corner gesture** and choose **Top-left**,
+**Top-right**, **Bottom-left**, or **Bottom-right**, then select a gesture and Save.
+The diagonal, vertical, and horizontal swipe choices always point inward from the
+selected corner; their labels and the handle arrow update automatically. For
+example, the diagonal swipe is up-right at bottom-left and down-left at top-right.
+**Double tap** and **Long press** work at every corner. The default is a diagonal
+swipe from bottom-left. Start inside the corner area, clear of system bars and
+cutouts; swipes capture on release. Ordinary single taps in the area are forwarded
+to the app underneath. With **Double tap** selected, a single tap waits briefly
+for Android to rule out a second tap. Drags starting in the area remain reserved
+for gesture detection.
+The filled, outlined handle covers the exact touch area. Set **Opacity** from
+0–100% (35% by default); 0% makes it invisible while keeping gestures and tap
+forwarding active. Use **Touch area size** to set its width and height from
+32–160 dp (48 dp by default). The rest of the screen remains usable normally.
+This works with the floating button disabled and uses the existing Screen capture
+access, without changing Android's default assistant. The handle hides while
+TouchAI is open, while the chat is collapsed, and during screenshots. Debug and
+release installations each need their own Screen capture access.
+Gesture, floating-button, notification, and automatic screenshot-attachment
+controls have separate settings groups. Notification capture delay and permission
+controls are in the notification group.
+
 Turn off **Settings → Quick access → Attach screenshots automatically** to start
 with the screenshot preview unselected. Its top-right **+** adds the image; the
 highlighted **×** excludes it without hiding the preview or resetting its crop.
@@ -196,7 +219,9 @@ and later, then wait for covering system windows to stay absent while the closin
 animation and blur settle. The delay defaults to 200 ms and can be adjusted from
 0–1000 ms in **Settings → Quick access → Notification capture delay**.
 The service reads window types and bounds for that readiness check;
-it does not inspect app view hierarchies or perform actions inside other apps.
+it does not inspect app view hierarchies. Ordinary taps intercepted by the corner
+area are replayed at the same screen position using Android's accessibility gesture
+API, with the corner window temporarily made non-touchable.
 Protected screens can block or blank screenshots; text-only conversation remains
 available. Capture stops safely when access is unavailable or revoked.
 
@@ -287,7 +312,8 @@ and sent-image previews. They use local
 mock responses and do not call paid AI endpoints.
 
 Manual device checks cover the floating button, dragging, clean captures from both
-entry points, repeat notification invocation, notification-only use, cropping, and
+original entry points, repeat notification invocation, all corner gestures,
+hidden and resized touch areas, rejected gestures, notification-only use, cropping, and
 portrait/landscape transitions. Android's legacy `uiautomator dump` can temporarily
 suspend accessibility services; avoid using it during capture verification.
 Instrumentation can also leave a previously enabled accessibility service awaiting

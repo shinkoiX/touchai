@@ -71,6 +71,7 @@ class QuickAccessRuntime(private val context: Context, private val repository: D
             ?: throw ScreenCaptureException("Enable screen capture access to keep a restore handle over other apps.")
         collapsedChat = true
         connectedService.setBubbleVisible(false)
+        connectedService.setCornerSwipeVisible(false)
         connectedService.setRestoreHandleVisible(true)
     }
 
@@ -79,8 +80,13 @@ class QuickAccessRuntime(private val context: Context, private val repository: D
         updateOverlays()
     }
 
+    fun reportTapForwardingFailure() {
+        mutableState.update { it.copy(error = "Could not forward the tap. Re-enable TouchAI screen capture in Android Accessibility settings.") }
+    }
+
     private fun updateOverlays() {
         service?.setBubbleVisible(optionsLoaded && state.value.options.floatingButton && !appVisible && !collapsedChat)
+        service?.setCornerSwipeVisible(optionsLoaded && state.value.options.cornerSwipe && !appVisible && !collapsedChat)
         service?.setRestoreHandleVisible(collapsedChat)
     }
 
@@ -97,7 +103,7 @@ class QuickAccessRuntime(private val context: Context, private val repository: D
 
     private fun applyOptions() {
         if (!optionsLoaded) return
-        service?.updateButtonPosition(state.value.options)
+        service?.updateOptions(state.value.options)
         updateOverlays()
         updateNotification()
     }

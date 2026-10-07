@@ -5,6 +5,7 @@
     android:canRetrieveWindowContent="true"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:canTakeScreenshot="true"
+    android:canPerformGestures="true"
     android:description="@string/accessibility_service_description"
     android:notificationTimeout="100"
     android:settingsActivity="app.touchai.android.MainActivity" />

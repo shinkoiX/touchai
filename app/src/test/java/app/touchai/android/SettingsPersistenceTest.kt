@@ -46,7 +46,9 @@ class SettingsPersistenceTest {
                 OpenAIModelConfig(apiKey = "another-preset-secret", model = "another-model", baseUrl = "https://preset.example.com/v1", webSearch = false), "Preset instructions"))),
             lastPresetId = "test", imageQuality = ImageQuality.Original,
             quickAccess = QuickAccessSettings(floatingButton = false, notificationCaptureDelayMillis = 650,
-                buttonSizeDp = 80, attachScreenshotAutomatically = false),
+                buttonSizeDp = 80, attachScreenshotAutomatically = false, cornerSwipe = true,
+                cornerGestures = setOf(CornerGesture.SwipeUp, CornerGesture.DoubleTap),
+                cornerOpacityPercent = 0, cornerAreaSizeDp = 128),
         )
         val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         try {
@@ -73,6 +75,15 @@ class SettingsPersistenceTest {
             repository.save(settings) // A stale settings form must not overwrite the latest selection.
             assertNull(repository.load().lastPresetId)
             assertEquals(settings.api, repository.load().api)
+            repository.pauseQuickAccess()
+            val paused = repository.load().quickAccess
+            assertFalse(paused.floatingButton)
+            assertFalse(paused.notification)
+            assertFalse(paused.cornerSwipe)
+            assertEquals(settings.quickAccess.buttonSizeDp, paused.buttonSizeDp)
+            assertEquals(settings.quickAccess.cornerGestures, paused.cornerGestures)
+            assertEquals(0, paused.cornerOpacityPercent)
+            assertEquals(128, paused.cornerAreaSizeDp)
             repository.rememberPreset("test")
             assertEquals("test", repository.load().lastPresetId)
             repository.save(settings.copy(presets = emptyList()))

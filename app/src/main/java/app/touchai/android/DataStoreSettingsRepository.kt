@@ -79,6 +79,11 @@ class DataStoreSettingsRepository(
             if (settings.presets.none { it.id == selected }) prefs[LastPreset] = ""
             prefs[Quality] = settings.imageQuality.name
             prefs[FloatingButton] = settings.quickAccess.floatingButton
+            prefs[CornerSwipe] = settings.quickAccess.cornerSwipe
+            prefs[GestureCornerPosition] = settings.quickAccess.gestureCorner.name
+            prefs[CornerGestures] = settings.quickAccess.cornerGestures.map { it.name }.toSet()
+            prefs[CornerOpacity] = settings.quickAccess.cornerOpacityPercent
+            prefs[CornerAreaSize] = settings.quickAccess.cornerAreaSizeDp
             prefs[Notification] = settings.quickAccess.notification
             prefs[NotificationCaptureDelay] = settings.quickAccess.notificationCaptureDelayMillis
             prefs[ButtonSize] = settings.quickAccess.buttonSizeDp
@@ -97,7 +102,7 @@ class DataStoreSettingsRepository(
     }
 
     suspend fun pauseQuickAccess() {
-        store.edit { it[FloatingButton] = false; it[Notification] = false }
+        store.edit { it[FloatingButton] = false; it[Notification] = false; it[CornerSwipe] = false }
     }
 
     private fun readQuickAccess(prefs: Preferences) = QuickAccessSettings(
@@ -106,6 +111,11 @@ class DataStoreSettingsRepository(
         notificationCaptureDelayMillis = prefs[NotificationCaptureDelay] ?: QuickAccessSettings().notificationCaptureDelayMillis,
         buttonSizeDp = prefs[ButtonSize] ?: QuickAccessSettings().buttonSizeDp,
         attachScreenshotAutomatically = prefs[AttachScreenshotAutomatically] ?: QuickAccessSettings().attachScreenshotAutomatically,
+        cornerSwipe = prefs[CornerSwipe] ?: QuickAccessSettings().cornerSwipe,
+        gestureCorner = prefs[GestureCornerPosition]?.let(GestureCorner::valueOf) ?: QuickAccessSettings().gestureCorner,
+        cornerGestures = prefs[CornerGestures]?.map(CornerGesture::valueOf)?.toSet() ?: QuickAccessSettings().cornerGestures,
+        cornerOpacityPercent = prefs[CornerOpacity] ?: QuickAccessSettings().cornerOpacityPercent,
+        cornerAreaSizeDp = prefs[CornerAreaSize] ?: QuickAccessSettings().cornerAreaSizeDp,
     )
 
     private fun encodeAi(configuration: AiConfiguration) = buildJsonObject {
@@ -153,6 +163,11 @@ class DataStoreSettingsRepository(
         val LastPreset = stringPreferencesKey("default_preset")
         val Quality = stringPreferencesKey("image_quality")
         val FloatingButton = booleanPreferencesKey("floating_button")
+        val CornerSwipe = booleanPreferencesKey("corner_swipe")
+        val GestureCornerPosition = stringPreferencesKey("gesture_corner")
+        val CornerGestures = stringSetPreferencesKey("corner_gestures")
+        val CornerOpacity = intPreferencesKey("corner_opacity_percent")
+        val CornerAreaSize = intPreferencesKey("corner_area_size_dp")
         val Notification = booleanPreferencesKey("notification")
         val NotificationCaptureDelay = intPreferencesKey("notification_capture_delay_ms")
         val ButtonSize = intPreferencesKey("button_size_dp")

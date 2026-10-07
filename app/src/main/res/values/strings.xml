@@ -2,5 +2,6 @@
     <string name="app_name">TouchAI</string>
     <string name="floating_button_description">Ask AI about this screen</string>
     <string name="accessibility_service_label">TouchAI screen capture</string>
-    <string name="accessibility_service_description">Shows a floating button and takes a screenshot only when you tap it. Nothing is sent until you press Send. TouchAI does not click or type in other apps.</string>
+    <string name="accessibility_service_description">Takes a screenshot when you invoke TouchAI through the floating button, notification, or corner gestures. Ordinary taps in the corner area are forwarded to the app underneath. Nothing is sent until you press Send.</string>
+    <string name="corner_gesture_description">%1$s to capture screen</string>
 </resources>

@@ -1,12 +1,14 @@
 package app.touchai.android
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.annotation.SuppressLint
 import android.content.res.ColorStateList
 import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.Path
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.view.Choreographer
@@ -27,13 +29,25 @@ import kotlin.coroutines.resumeWithException
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class ScreenCaptureService : AccessibilityService() {
     private val runtime get() = (application as TouchAiApplication).quickAccess
     private val windowManager by lazy { getSystemService(WindowManager::class.java) }
     private var bubble: ImageView? = null
     private var restoreHandle: View? = null
+    private var cornerSwipe: CornerSwipeView? = null
     private var bubbleVisible = false
+    private var cornerSwipeVisible = false
+    private var forwardingTap = false
+    private val touchScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val tapMutex = Mutex()
     private var capturing = false
     private var options = QuickAccessSettings()
     private val params by lazy {
@@ -46,15 +60,22 @@ class ScreenCaptureService : AccessibilityService() {
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT).apply { gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL }
     }
+    private val cornerSwipeParams by lazy {
+        WindowManager.LayoutParams(dp(48), dp(48), WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT)
+    }
 
     override fun onServiceConnected() { runtime.connect(this) }
     override fun onAccessibilityEvent(event: AccessibilityEvent?) = Unit
     override fun onInterrupt() = Unit
 
-    fun updateButtonPosition(value: QuickAccessSettings) {
+    fun updateOptions(value: QuickAccessSettings) {
         options = value
         sizeButton()
         positionButton()
+        cornerSwipe?.configure(options)
+        positionCornerSwipe()
     }
 
     private fun sizeButton() {
@@ -73,6 +94,80 @@ class ScreenCaptureService : AccessibilityService() {
     fun setRestoreHandleVisible(visible: Boolean) {
         if (visible && restoreHandle == null) createRestoreHandle()
         restoreHandle?.visibility = if (visible && !capturing) View.VISIBLE else View.GONE
+    }
+
+    fun setCornerSwipeVisible(visible: Boolean) {
+        cornerSwipeVisible = visible
+        if (visible && cornerSwipe == null) {
+            cornerSwipe = CornerSwipeView(this, ::forwardCornerTap) {
+                if (!capturing) startActivity(CaptureActivity.intent(this))
+            }.apply { configure(options) }
+            positionCornerSwipe(updateWindow = false)
+            windowManager.addView(cornerSwipe, cornerSwipeParams)
+        }
+        cornerSwipe?.visibility = if (visible && !capturing) View.VISIBLE else View.GONE
+    }
+
+    private fun forwardCornerTap(x: Float, y: Float) {
+        touchScope.launch {
+            tapMutex.withLock {
+                if (!cornerSwipeVisible || capturing) return@withLock
+                forwardingTap = true
+                updateCornerTouchability()
+                try {
+                    // Let the input window become non-touchable before replaying the user's tap.
+                    repeat(2) { nextFrame() }
+                    if (!cornerSwipeVisible || capturing) return@withLock
+                    val path = Path().apply { moveTo(x, y) }
+                    val gesture = GestureDescription.Builder()
+                        .addStroke(GestureDescription.StrokeDescription(path, 0, 1))
+                        .build()
+                    suspendCancellableCoroutine { continuation ->
+                        val callback = object : GestureResultCallback() {
+                            override fun onCompleted(gestureDescription: GestureDescription) {
+                                if (continuation.isActive) continuation.resume(Unit)
+                            }
+                            override fun onCancelled(gestureDescription: GestureDescription) {
+                                if (continuation.isActive) continuation.resume(Unit)
+                            }
+                        }
+                        if (!dispatchGesture(gesture, callback, null)) {
+                            runtime.reportTapForwardingFailure()
+                            continuation.resume(Unit)
+                        }
+                    }
+                } catch (_: SecurityException) {
+                    runtime.reportTapForwardingFailure()
+                } finally {
+                    forwardingTap = false
+                    updateCornerTouchability()
+                }
+            }
+        }
+    }
+
+    private fun updateCornerTouchability() {
+        cornerSwipeParams.flags = if (forwardingTap) {
+            cornerSwipeParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        } else {
+            cornerSwipeParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+        }
+        cornerSwipe?.let { windowManager.updateViewLayout(it, cornerSwipeParams) }
+    }
+
+    @SuppressLint("RtlHardcoded") // Corner choices refer to physical screen edges in every locale.
+    private fun positionCornerSwipe(updateWindow: Boolean = true) {
+        cornerSwipeParams.width = dp(options.cornerAreaSizeDp)
+        cornerSwipeParams.height = cornerSwipeParams.width
+        val insets = windowManager.maximumWindowMetrics.windowInsets.getInsetsIgnoringVisibility(
+            WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.mandatorySystemGestures())
+        val corner = options.gestureCorner
+        cornerSwipeParams.gravity = (if (corner.onBottom) Gravity.BOTTOM else Gravity.TOP) or
+            (if (corner.onRight) Gravity.RIGHT else Gravity.LEFT)
+        // Keep the touch target clear of system bars, cutouts, and mandatory gestures.
+        cornerSwipeParams.x = (if (corner.onRight) insets.right else insets.left) + dp(8)
+        cornerSwipeParams.y = (if (corner.onBottom) insets.bottom else insets.top) + dp(8)
+        if (updateWindow) cornerSwipe?.let { windowManager.updateViewLayout(it, cornerSwipeParams) }
     }
 
     @SuppressLint("ClickableViewAccessibility") // Both tapping and swiping up invoke the accessible click action.
@@ -200,6 +295,7 @@ class ScreenCaptureService : AccessibilityService() {
         capturing = true
         bubble?.visibility = View.GONE
         restoreHandle?.visibility = View.GONE
+        cornerSwipe?.visibility = View.GONE
         try {
             if (waitForNotificationShade) {
                 if (Build.VERSION.SDK_INT >= 31) performGlobalAction(GLOBAL_ACTION_DISMISS_NOTIFICATION_SHADE)
@@ -229,6 +325,7 @@ class ScreenCaptureService : AccessibilityService() {
         } finally {
             capturing = false
             setBubbleVisible(bubbleVisible)
+            setCornerSwipeVisible(cornerSwipeVisible)
         }
     }
 
@@ -245,13 +342,23 @@ class ScreenCaptureService : AccessibilityService() {
         }
     }
 
-    override fun onConfigurationChanged(newConfig: Configuration) { super.onConfigurationChanged(newConfig); positionButton(); positionRestoreHandle() }
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        positionButton()
+        positionRestoreHandle()
+        cornerSwipe?.configure(options)
+        positionCornerSwipe()
+    }
     override fun onDestroy() {
+        touchScope.cancel()
         bubbleVisible = false
         bubble?.let(windowManager::removeViewImmediate)
         bubble = null
         restoreHandle?.let(windowManager::removeViewImmediate)
         restoreHandle = null
+        cornerSwipeVisible = false
+        cornerSwipe?.let(windowManager::removeViewImmediate)
+        cornerSwipe = null
         runtime.disconnect(this)
         super.onDestroy()
     }
