@@ -43,7 +43,9 @@ class SettingsPersistenceTest {
             api = OpenAIModelConfig(apiKey = "test-secret-never-plaintext", model = "test", protocol = ApiProtocol.Responses, reasoningEffort = "low", backgroundResponses = true),
             instructions = "Be concise",
             presets = listOf(PromptPreset("test", "Explain", "Explain this image", AiConfiguration(
-                OpenAIModelConfig(apiKey = "another-preset-secret", model = "another-model", baseUrl = "https://preset.example.com/v1", webSearch = false), "Preset instructions"))),
+                OpenAIModelConfig(apiKey = "another-preset-secret", model = "another-model", baseUrl = "https://preset.example.com/v1", webSearch = false), "Preset instructions")),
+                PromptPreset("always", "With screenshot", "Explain this screen", attachScreenshot = true),
+                PromptPreset("never", "Without screenshot", "Answer this question", attachScreenshot = false)),
             lastPresetId = "test", imageQuality = ImageQuality.Original,
             quickAccess = QuickAccessSettings(floatingButton = false, notificationCaptureDelayMillis = 650,
                 buttonSizeDp = 80, attachScreenshotAutomatically = false, cornerSwipe = true,

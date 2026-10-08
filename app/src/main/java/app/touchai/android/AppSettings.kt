@@ -9,6 +9,7 @@ data class PromptPreset(
     val name: String,
     val prompt: String,
     val customAi: AiConfiguration? = null,
+    val attachScreenshot: Boolean? = null,
 )
 
 enum class ImageQuality(val label: String, val maxEdge: Int?, val jpegQuality: Int) {
@@ -74,6 +75,9 @@ data class AppSettings(
 
 fun AppSettings.aiFor(presetId: String?): AiConfiguration =
     presets.find { it.id == presetId }?.customAi ?: AiConfiguration(api, instructions)
+
+fun AppSettings.attachScreenshotFor(presetId: String?): Boolean =
+    presets.find { it.id == presetId }?.attachScreenshot ?: quickAccess.attachScreenshotAutomatically
 
 interface SettingsRepository {
     suspend fun load(): AppSettings

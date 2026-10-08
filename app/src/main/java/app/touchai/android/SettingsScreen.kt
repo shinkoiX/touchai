@@ -84,6 +84,10 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                                 Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                                     OutlinedTextField(preset.name, { change(preset.copy(name = it)) }, label = { Text("Name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
                                     OutlinedTextField(preset.prompt, { change(preset.copy(prompt = it)) }, label = { Text("Prompt") }, minLines = 2, modifier = Modifier.fillMaxWidth())
+                                    Text("Screenshot attachment", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Choices(listOf(null, true, false), { it == preset.attachScreenshot }, {
+                                        when (it) { null -> "Default"; true -> "Always"; false -> "Never" }
+                                    }) { change(preset.copy(attachScreenshot = it)) }
                                 }
                                 SwitchRow("Custom AI", preset.customAi != null, { custom ->
                                     change(preset.copy(customAi = if (custom) AiConfiguration(draft.api.copy(webSearch = true), draft.instructions) else null))

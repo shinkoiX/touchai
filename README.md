@@ -48,9 +48,14 @@ Gesture, floating-button, notification, and automatic screenshot-attachment
 controls have separate settings groups. Notification capture delay and permission
 controls are in the notification group.
 
-Turn off **Settings → Quick access → Attach screenshots automatically** to start
-with the screenshot preview unselected. Its top-right **+** adds the image; the
-highlighted **×** excludes it without hiding the preview or resetting its crop.
+Each preset has a **Screenshot attachment** option: **Default** follows the quick-access
+setting, **Always** attaches even when that setting is off, and **Never** leaves the
+screenshot unselected even when it is on. This applies when capturing or switching
+presets. The attachment toggle remains available, and gallery images are unaffected.
+
+With **Default** selected, turn off **Settings → Quick access → Attach screenshots
+automatically** to start with the screenshot preview unselected. Its top-right **+**
+adds the image; the highlighted **×** excludes it without hiding the preview or resetting its crop.
 The button and preview border are highlighted only while the image is attached.
 This toggle also works for gallery images. An unselected image is never included
 in a request. Tap the preview to crop it. The crop selection

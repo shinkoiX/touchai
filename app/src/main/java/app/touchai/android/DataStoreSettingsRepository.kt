@@ -44,7 +44,8 @@ class DataStoreSettingsRepository(
                     PromptPreset(preset.getValue("id").jsonPrimitive.content,
                         preset.getValue("name").jsonPrimitive.content,
                         preset.getValue("prompt").jsonPrimitive.content,
-                        (preset["ai"] as? JsonObject)?.let(::decodeAi))
+                        (preset["ai"] as? JsonObject)?.let(::decodeAi),
+                        attachScreenshot = preset["attachScreenshot"]?.jsonPrimitive?.booleanOrNull)
                 }
             } ?: defaults.presets,
             lastPresetId = prefs[LastPreset]?.takeIf(String::isNotEmpty) ?: if (prefs.contains(LastPreset)) null else defaults.lastPresetId,
@@ -60,6 +61,7 @@ class DataStoreSettingsRepository(
                 put("id", preset.id)
                 put("name", preset.name)
                 put("prompt", preset.prompt)
+                put("attachScreenshot", preset.attachScreenshot)
                 preset.customAi?.let { put("ai", encodeAi(it)) }
             }) }
         }.toString()

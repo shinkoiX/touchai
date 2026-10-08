@@ -34,17 +34,17 @@ class ChatFlowInstrumentedTest {
     private var configuration: OpenAIModelConfig? = null
     private val custom = AiConfiguration(OpenAIModelConfig(apiKey = "test-only", model = "custom-model", webSearch = false))
 
-    private fun setup(attachScreenshots: Boolean = true) {
-        var settings = AppSettings(
+    private fun setup(attachScreenshots: Boolean = true, screenshotOverride: Boolean? = null) {
+        var storedSettings = AppSettings(
             api = OpenAIModelConfig(apiKey = "test-only", model = "default-model"),
-            presets = listOf(PromptPreset("custom", "Custom", "Explain this image", custom)),
+            presets = listOf(PromptPreset("custom", "Custom", "Explain this image", custom, attachScreenshot = screenshotOverride)),
             lastPresetId = "custom", imageQuality = ImageQuality.Original,
             quickAccess = QuickAccessSettings(attachScreenshotAutomatically = attachScreenshots),
         )
         val repository = object : SettingsRepository {
-            override suspend fun load() = settings
-            override suspend fun save(settings: AppSettings) = Unit
-            override suspend fun rememberPreset(id: String?) { settings = settings.copy(lastPresetId = id) }
+            override suspend fun load() = storedSettings
+            override suspend fun save(settings: AppSettings) { storedSettings = settings }
+            override suspend fun rememberPreset(id: String?) { storedSettings = storedSettings.copy(lastPresetId = id) }
         }
         val client = object : ChatClient {
             override fun stream(config: OpenAIModelConfig, value: OpenAIRequest) = events.receiveAsFlow().also {
@@ -86,7 +86,7 @@ class ChatFlowInstrumentedTest {
     }
 
     @Test fun screenshotCanBeAddedRemovedAndAddedAgainWithoutRecapturing() {
-        setup(attachScreenshots = false)
+        setup(screenshotOverride = false)
         val bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
         var captures = 0
         compose.runOnUiThread { viewModel.captureOnInvocation { captures++; bitmap } }
@@ -119,6 +119,64 @@ class ChatFlowInstrumentedTest {
         assertNull(viewModel.uiState.value.capturedScreenshot)
         compose.runOnUiThread { viewModel.cancel() }
         compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
+    }
+
+    @Test fun presetAlwaysAttachesScreenshotWhenGlobalSettingIsOff() {
+        setup(attachScreenshots = false, screenshotOverride = true)
+        compose.runOnUiThread { viewModel.captureOnInvocation { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) } }
+        compose.waitUntil(5_000) { viewModel.uiState.value.image != null && !viewModel.uiState.value.invoking }
+        compose.onNodeWithContentDescription("Remove image").assertIsSelected()
+        val image = viewModel.uiState.value.image
+        compose.onNodeWithContentDescription("Send").performClick()
+        compose.waitUntil(5_000) { request != null }
+        assertEquals(listOf(image), request!!.messages.last().images)
+        compose.runOnUiThread { viewModel.cancel() }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
+    }
+
+    @Test fun presetNeverAttachesScreenshotWhenGlobalSettingIsOn() {
+        setup(screenshotOverride = false)
+        compose.runOnUiThread { viewModel.captureOnInvocation { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) } }
+        compose.waitUntil(5_000) { viewModel.uiState.value.image != null && !viewModel.uiState.value.invoking }
+        compose.onNodeWithContentDescription("Add image").assertIsNotSelected()
+        compose.onNodeWithContentDescription("Send").performClick()
+        compose.waitUntil(5_000) { request != null }
+        assertTrue(request!!.messages.last().images.isEmpty())
+        compose.runOnUiThread { viewModel.cancel() }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
+    }
+
+    @Test fun changingScreenshotOverrideAndPresetsKeepsCropAndLeavesGalleryImagesAlone() {
+        setup(screenshotOverride = false)
+        val bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+        var captures = 0
+        compose.runOnUiThread { viewModel.captureOnInvocation { captures++; bitmap } }
+        compose.waitUntil(5_000) { viewModel.uiState.value.image != null && !viewModel.uiState.value.invoking }
+        val crop = ImageCrop(0.2f, 0.2f, 0.8f, 0.8f)
+        compose.runOnUiThread { viewModel.applyCrop(crop) }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage }
+        val croppedImage = viewModel.uiState.value.image
+        compose.onNodeWithText("No preset").performClick()
+        compose.onNodeWithContentDescription("Remove image").assertIsSelected()
+        compose.onNodeWithText("Custom", useUnmergedTree = true).performClick()
+        compose.onNodeWithContentDescription("Add image").assertIsNotSelected()
+        compose.runOnUiThread {
+            val settings = viewModel.uiState.value.settings
+            viewModel.saveSettings(settings.copy(presets = settings.presets.map { it.copy(attachScreenshot = true) }))
+        }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.savingSettings }
+        compose.onNodeWithContentDescription("Remove image").assertIsSelected()
+        assertEquals(crop, viewModel.uiState.value.imageCrop)
+        assertSame(croppedImage, viewModel.uiState.value.image)
+        assertEquals(1, captures)
+        val galleryImage = Bitmap.createBitmap(40, 40, Bitmap.Config.ARGB_8888)
+        compose.runOnUiThread { viewModel.attachImage(galleryImage) }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage }
+        compose.onNodeWithContentDescription("Remove image").performClick()
+        compose.onNodeWithText("No preset").performClick()
+        compose.onNodeWithText("Custom", useUnmergedTree = true).performClick()
+        compose.onNodeWithContentDescription("Add image").assertIsNotSelected()
+        assertSame(galleryImage, viewModel.uiState.value.originalImage)
     }
 
     @Test fun cropPresetAndStreamingWorkTogether() {

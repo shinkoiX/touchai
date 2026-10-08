@@ -113,7 +113,9 @@ class OpenAIChatViewModel(
     fun setPrompt(value: String) = update { it.copy(prompt = value) }
     fun setImage(value: OpenAIImage?) = update { it.copy(image = value, imageAttached = value != null, imagePreview = null, error = null) }
     fun selectPreset(id: String?) {
-        update { it.copy(selectedPreset = id, prompt = presetText(it.settings, id), settings = it.settings.copy(lastPresetId = id)) }
+        update { it.copy(selectedPreset = id, prompt = presetText(it.settings, id), settings = it.settings.copy(lastPresetId = id),
+            imageAttached = if (id != it.selectedPreset && it.capturedScreenshot != null && it.originalImage === it.capturedScreenshot)
+                it.settings.attachScreenshotFor(id) else it.imageAttached) }
         presetSaveJob?.cancel()
         presetSaveJob = viewModelScope.launch {
             try { repository.rememberPreset(id) }
@@ -224,7 +226,7 @@ class OpenAIChatViewModel(
                 val settings = repository.load()
                 update { it.copy(settings = settings, ready = true, selectedPreset = rememberedPreset(settings),
                     prompt = presetText(settings, rememberedPreset(settings)), invoking = false, capturedScreenshot = bitmap) }
-                attachImage(bitmap, attached = settings.quickAccess.attachScreenshotAutomatically)
+                attachImage(bitmap, attached = settings.attachScreenshotFor(rememberedPreset(settings)))
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { update { it.copy(invoking = false, error = error.message ?: "Screen capture failed. Continue without an image.") } }
         }
@@ -291,6 +293,9 @@ class OpenAIChatViewModel(
                     current.copy(settings = saved, ready = true, settingsOpen = false, settingsDraft = null,
                         turns = if (saved == current.settings) current.turns else emptyList(), selectedPreset = selected,
                         chatId = if (saved == current.settings) current.chatId else UUID.randomUUID().toString(),
+                        imageAttached = if (current.capturedScreenshot != null && current.originalImage === current.capturedScreenshot &&
+                            saved.attachScreenshotFor(selected) != current.settings.attachScreenshotFor(current.selectedPreset))
+                            saved.attachScreenshotFor(selected) else current.imageAttached,
                         prompt = if (current.prompt == presetText(current.settings, current.selectedPreset)) presetText(saved, selected) else current.prompt)
                 }
                 if (saved.imageQuality != before.settings.imageQuality) {
