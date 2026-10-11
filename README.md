@@ -54,11 +54,12 @@ screenshot unselected even when it is on. This applies when capturing or switchi
 presets. The attachment toggle remains available, and gallery images are unaffected.
 
 With **Default** selected, turn off **Settings → Quick access → Attach screenshots
-automatically** to start with the screenshot preview unselected. Its top-right **+**
-adds the image; the highlighted **×** excludes it without hiding the preview or resetting its crop.
+automatically** to start with the screenshot preview unselected. Tap a photo to
+include or exclude it without hiding the preview or resetting its crop. Its top-right
+badge shows its sending sequence, or **+** when excluded.
 The button and preview border are highlighted only while the image is attached.
 This toggle also works for gallery images. An unselected image is never included
-in a request. Tap the preview to crop it. The crop selection
+in a request. Use the bottom-right crop button to crop it. The crop selection
 starts at the full image. Your last selected preset fills the message box; edit
 that text and press **Send**. No image is uploaded before Send. Selecting **No
 preset** is also remembered.
@@ -88,7 +89,8 @@ Screenshots and gallery pictures share one ordered collection. **Settings → Im
 limit** sets its capacity from 1–10 images (3 by default). Adding an image beyond
 the limit removes the oldest; lowering the limit keeps the newest images. Each
 image can be cropped, included or excluded, or deleted separately. Included images
-are sent in collection order, and sending clears the pending collection.
+are numbered and sent in the order you select them. Selecting an excluded image
+again places it last in the sending sequence. Sending clears the pending collection.
 
 Responses image-generation results and Chat Completions `delta.images` data URLs
 appear directly in the assistant's message, including image-only replies.
@@ -98,7 +100,8 @@ Use the download button on a sent/generated picture or in its viewer to save it 
 Generated images are retained in chat history and history exports, and are included
 as image context for follow-up messages. PNG, JPEG, and WebP outputs are supported.
 
-The crop editor supports resizing, moving the selection, pan/zoom, and reset. Crop
+The crop editor supports corner and edge resizing, moving the selection, pan/zoom,
+and reset. A gutter keeps border handles accessible at the image margins. Crop
 coordinates map to the original pixels regardless of zoom or screen orientation.
 Reopening crop keeps the applied selection and retains the original image, so
 **Reset** can restore the full screenshot. **Cancel** leaves the attachment unchanged.

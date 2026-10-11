@@ -4,6 +4,30 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ImageCropTest {
+    @Test fun marginsAndCornersHaveTouchTargetsOutsideTheImage() {
+        val crop = ImageCrop.Full
+        assertEquals(CropHandle.TopLeft, crop.hitHandle(-12f, -12f, 300f, 600f, 28f))
+        assertEquals(CropHandle.BottomRight, crop.hitHandle(312f, 612f, 300f, 600f, 28f))
+        assertEquals(CropHandle.Left, crop.hitHandle(-12f, 300f, 300f, 600f, 28f))
+        assertEquals(CropHandle.Right, crop.hitHandle(312f, 300f, 300f, 600f, 28f))
+        assertEquals(CropHandle.Top, crop.hitHandle(150f, -12f, 300f, 600f, 28f))
+        assertEquals(CropHandle.Bottom, crop.hitHandle(150f, 612f, 300f, 600f, 28f))
+        assertEquals(CropHandle.Move, crop.hitHandle(150f, 300f, 300f, 600f, 28f))
+        assertNull(crop.hitHandle(-80f, 300f, 300f, 600f, 28f))
+    }
+
+    @Test fun edgeResizingChangesOnlyThatEdgeAndKeepsTheMinimumSize() {
+        val crop = ImageCrop(0.2f, 0.2f, 0.8f, 0.8f)
+        assertEquals(ImageCrop(0.4f, 0.2f, 0.8f, 0.8f), crop.drag(CropHandle.Left, 0.2f, 0.5f))
+        assertEquals(ImageCrop(0.2f, 0.4f, 0.8f, 0.8f), crop.drag(CropHandle.Top, 0.5f, 0.2f))
+        val right = crop.drag(CropHandle.Right, -1f, 0.5f)
+        val bottom = crop.drag(CropHandle.Bottom, 0.5f, -1f)
+        assertEquals(0.03f, right.right - right.left, 0.0001f)
+        assertEquals(0.03f, bottom.bottom - bottom.top, 0.0001f)
+        assertEquals(crop.top, right.top)
+        assertEquals(crop.right, bottom.right)
+    }
+
     @Test fun cropMapsBackToOriginalPixels() {
         val crop = ImageCrop(0.25f, 0.1f, 0.75f, 0.9f)
         assertEquals(PixelCrop(100, 20, 200, 160), crop.pixels(400, 200))

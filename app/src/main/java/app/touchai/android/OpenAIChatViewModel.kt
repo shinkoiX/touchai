@@ -49,9 +49,21 @@ data class ImageAttachment(
     val image: OpenAIImage? = null,
     val screenshot: Boolean = false,
     val crop: ImageCrop = ImageCrop.Full,
-    val attached: Boolean = true,
+    val selectionOrder: Int? = null,
     val preparing: Boolean = false,
-)
+) {
+    val attached: Boolean get() = selectionOrder != null
+}
+
+private val List<ImageAttachment>.nextSelectionOrder: Int get() = (mapNotNull { it.selectionOrder }.maxOrNull() ?: 0) + 1
+
+private fun List<ImageAttachment>.withScreenshotAttachment(attached: Boolean): List<ImageAttachment> {
+    var nextOrder = nextSelectionOrder
+    return map { image ->
+        if (!image.screenshot || image.attached == attached) image
+        else image.copy(selectionOrder = if (attached) nextOrder++ else null)
+    }
+}
 
 data class OpenAIChatUiState(
     val settings: AppSettings = AppSettings(),
@@ -79,6 +91,7 @@ data class OpenAIChatUiState(
 ) {
     val isStreaming: Boolean get() = turns.lastOrNull()?.isRunning == true
     val selectedAi: AiConfiguration get() = settings.aiFor(selectedPreset)
+    val sendingImages: List<ImageAttachment> get() = attachments.filter { it.attached }.sortedBy { it.selectionOrder }
     val preparingImages: Boolean get() = attachments.any { it.preparing }
     val canSendImages: Boolean get() = attachments.none { it.attached && (it.preparing || it.image == null) }
 }
@@ -125,9 +138,7 @@ class OpenAIChatViewModel(
     fun setImage(value: OpenAIImage) = addAttachment(ImageAttachment(image = value))
     fun selectPreset(id: String?) {
         update { it.copy(selectedPreset = id, prompt = presetText(it.settings, id), settings = it.settings.copy(lastPresetId = id),
-            attachments = if (id != it.selectedPreset) it.attachments.map { image ->
-                if (image.screenshot) image.copy(attached = it.settings.attachScreenshotFor(id)) else image
-            } else it.attachments) }
+            attachments = if (id != it.selectedPreset) it.attachments.withScreenshotAttachment(it.settings.attachScreenshotFor(id)) else it.attachments) }
         presetSaveJob?.cancel()
         presetSaveJob = viewModelScope.launch {
             try { repository.rememberPreset(id) }
@@ -246,13 +257,15 @@ class OpenAIChatViewModel(
     fun attachImage(bitmap: Bitmap) = attachBitmap(bitmap, screenshot = false)
 
     private fun attachBitmap(bitmap: Bitmap, screenshot: Boolean, attached: Boolean = true) {
-        val image = ImageAttachment(original = bitmap, screenshot = screenshot, attached = attached)
-        addAttachment(image)
+        val image = ImageAttachment(original = bitmap, screenshot = screenshot)
+        addAttachment(image, attached)
         prepareImage(image.id)
     }
 
-    private fun addAttachment(image: ImageAttachment) {
-        val images = (_uiState.value.attachments + image).takeLast(_uiState.value.settings.imageLimit)
+    private fun addAttachment(image: ImageAttachment, attached: Boolean = true) {
+        val current = _uiState.value
+        val selected = image.copy(selectionOrder = if (attached) current.attachments.nextSelectionOrder else null)
+        val images = (current.attachments + selected).takeLast(current.settings.imageLimit)
         cancelRemovedImages(images)
         update { it.copy(attachments = images, croppingImageId = null, error = null) }
     }
@@ -281,7 +294,9 @@ class OpenAIChatViewModel(
     }
 
     fun toggleImageAttachment(id: String) = update { state ->
-        state.copy(attachments = state.attachments.map { if (it.id == id) it.copy(attached = !it.attached) else it }, error = null)
+        state.copy(attachments = state.attachments.map {
+            if (it.id == id) it.copy(selectionOrder = if (it.attached) null else state.attachments.nextSelectionOrder) else it
+        }, error = null)
     }
 
     fun openCrop(id: String) = update { it.copy(croppingImageId = id) }
@@ -345,10 +360,8 @@ class OpenAIChatViewModel(
                     current.copy(settings = saved, ready = true, settingsOpen = false, settingsDraft = null,
                         turns = if (conversationChanged) emptyList() else current.turns, selectedPreset = selected,
                         chatId = if (conversationChanged) UUID.randomUUID().toString() else current.chatId,
-                        attachments = images.map { image ->
-                            if (image.screenshot && saved.attachScreenshotFor(selected) != current.settings.attachScreenshotFor(current.selectedPreset))
-                                image.copy(attached = saved.attachScreenshotFor(selected)) else image
-                        },
+                        attachments = if (saved.attachScreenshotFor(selected) != current.settings.attachScreenshotFor(current.selectedPreset))
+                            images.withScreenshotAttachment(saved.attachScreenshotFor(selected)) else images,
                         croppingImageId = current.croppingImageId?.takeIf { id -> images.any { it.id == id } },
                         prompt = if (current.prompt == presetText(current.settings, current.selectedPreset)) presetText(saved, selected) else current.prompt)
                 }
@@ -386,7 +399,7 @@ class OpenAIChatViewModel(
         if (error != null) { update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = error) }; return }
         val preset = snapshot.settings.presets.find { it.id == snapshot.selectedPreset }
         val prompt = snapshot.prompt.trim()
-        val images = snapshot.attachments.filter { it.attached }.map { it.image!! }
+        val images = snapshot.sendingImages.map { it.image!! }
         if (prompt.isBlank() && images.isEmpty()) { reportError("Enter a message, choose a preset, or attach an image."); return }
         val user = ChatMessage(MessageRole.User, prompt, images)
         clearImageJobs()

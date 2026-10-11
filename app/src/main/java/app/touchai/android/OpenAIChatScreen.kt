@@ -155,6 +155,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                         AssistantMessage(turn, canRetry = index == state.turns.lastIndex && !state.isStreaming, onRetry = viewModel::retry)
                     }
                     val images = state.attachments.filter { it.preview != null }
+                    val sendingSequence = state.sendingImages.mapIndexed { index, image -> image.id to index + 1 }.toMap()
                     val imageScroll = rememberScrollState()
                     LaunchedEffect(images.lastOrNull()?.id, imageScroll.maxValue) { imageScroll.scrollTo(imageScroll.maxValue) }
                     BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -162,7 +163,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                         Row(Modifier.fillMaxWidth().horizontalScroll(imageScroll), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                             images.forEach { image -> key(image.id) {
                                 Attachment(image.preview!!, maxHeight = if (compact) 160.dp else if (images.size > 1) 240.dp else if (state.turns.isEmpty()) 440.dp else 280.dp,
-                                    preparing = image.preparing, attached = image.attached,
+                                    preparing = image.preparing, attached = image.attached, sequence = sendingSequence[image.id],
                                     onCrop = { keyboard?.hide(); viewModel.openCrop(image.id) },
                                     onToggle = { viewModel.toggleImageAttachment(image.id) }, onDelete = { viewModel.removeImage(image.id) },
                                     modifier = Modifier.width(imageWidth))
@@ -374,7 +375,7 @@ private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> U
 }
 
 @Composable
-private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, attached: Boolean, onCrop: () -> Unit, onToggle: () -> Unit,
+private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, attached: Boolean, sequence: Int?, onCrop: () -> Unit, onToggle: () -> Unit,
     onDelete: () -> Unit, modifier: Modifier) {
     val shape = MaterialTheme.shapes.large
     Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -383,7 +384,11 @@ private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, attach
                 Modifier.heightIn(min = 96.dp, max = maxHeight).widthIn(min = 96.dp)
                     .clip(shape).background(MaterialTheme.colorScheme.surfaceContainer)
                     .border(BorderStroke(if (attached) 2.dp else 1.dp, if (attached) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant), shape)
-                    .clickable(onClick = onCrop).semantics { contentDescription = "Crop image" },
+                    .clickable(onClick = onToggle).semantics {
+                        contentDescription = "Image preview"
+                        selected = attached
+                        stateDescription = if (sequence != null) "Send image $sequence" else "Not attached"
+                    },
                 contentScale = ContentScale.Fit)
             Surface(onClick = onToggle, shape = CircleShape,
                 color = if (attached) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHighest,
@@ -391,17 +396,20 @@ private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, attach
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp).size(36.dp).semantics {
                     contentDescription = if (attached) "Remove image" else "Add image"
                     selected = attached
-                    stateDescription = if (attached) "Attached" else "Not attached"
+                    stateDescription = if (sequence != null) "Send image $sequence" else "Not attached"
                 }) {
-                Box(contentAlignment = Alignment.Center) { AppIcon(if (attached) R.drawable.ic_close else R.drawable.ic_add, null, size = 20.dp) }
+                Box(contentAlignment = Alignment.Center) {
+                    if (sequence != null) Text(sequence.toString(), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+                    else AppIcon(R.drawable.ic_add, null, size = 20.dp)
+                }
             }
             Surface(onClick = onDelete, shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White,
                 modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).size(28.dp).semantics { contentDescription = "Delete image" }) {
                 Box(contentAlignment = Alignment.Center) { AppIcon(R.drawable.ic_delete, null, size = 16.dp) }
             }
-            Surface(shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).size(28.dp)) {
-                Box(contentAlignment = Alignment.Center) { AppIcon(R.drawable.ic_crop, null, size = 16.dp) }
+            Surface(onClick = onCrop, shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White,
+                modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).size(36.dp).semantics { contentDescription = "Crop image" }) {
+                Box(contentAlignment = Alignment.Center) { AppIcon(R.drawable.ic_crop, null, size = 20.dp) }
             }
         }
         if (preparing) LinearProgressIndicator(Modifier.width(96.dp))

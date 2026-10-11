@@ -19,6 +19,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -57,8 +58,11 @@ private fun CropEditor(bitmap: Bitmap, crop: ImageCrop, onCrop: (ImageCrop) -> U
     var panMode by rememberSaveable { mutableStateOf(false) }
     val currentCrop by rememberUpdatedState(crop)
     val image = remember(bitmap) { bitmap.asImageBitmap() }
+    val handleColor = MaterialTheme.colorScheme.primary
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val gutter = with(density) { 28.dp.toPx() }
     fun bounds(): Rect {
-        val scale = min(viewport.width.toFloat() / bitmap.width, viewport.height.toFloat() / bitmap.height) * zoom
+        val scale = min((viewport.width - 2f * gutter) / bitmap.width, (viewport.height - 2f * gutter) / bitmap.height) * zoom
         val size = Size(bitmap.width * scale, bitmap.height * scale)
         return Rect(Offset((viewport.width - size.width) / 2f, (viewport.height - size.height) / 2f) + pan, size)
     }
@@ -68,8 +72,8 @@ private fun CropEditor(bitmap: Bitmap, crop: ImageCrop, onCrop: (ImageCrop) -> U
     }
     fun constrainPan(value: Offset): Offset {
         val rect = bounds()
-        val x = ((rect.width - viewport.width) / 2f).coerceAtLeast(0f)
-        val y = ((rect.height - viewport.height) / 2f).coerceAtLeast(0f)
+        val x = ((rect.width - (viewport.width - 2f * gutter)) / 2f).coerceAtLeast(0f)
+        val y = ((rect.height - (viewport.height - 2f * gutter)) / 2f).coerceAtLeast(0f)
         return Offset(value.x.coerceIn(-x, x), value.y.coerceIn(-y, y))
     }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -98,26 +102,21 @@ private fun CropEditor(bitmap: Bitmap, crop: ImageCrop, onCrop: (ImageCrop) -> U
                 } else {
                     var handle: CropHandle? = null
                     var start = Offset.Zero
-                    detectDragGestures(onDragStart = { point ->
+                    var dragCrop = currentCrop
+                    detectDragGestures(orientationLock = null, onDragStart = { down, _, _ ->
+                        val point = down.position
                         val rect = bounds()
                         val selection = currentCrop
-                        val corners = listOf(
-                            CropHandle.TopLeft to Offset(selection.left, selection.top),
-                            CropHandle.TopRight to Offset(selection.right, selection.top),
-                            CropHandle.BottomLeft to Offset(selection.left, selection.bottom),
-                            CropHandle.BottomRight to Offset(selection.right, selection.bottom),
-                        ).map { (handle, value) -> handle to Offset(rect.left + value.x * rect.width, rect.top + value.y * rect.height) }
-                        val nearest = corners.minBy { (_, corner) -> (corner - point).getDistance() }
+                        dragCrop = selection
                         start = normalized(point)
-                        handle = if ((nearest.second - point).getDistance() <= 32.dp.toPx()) nearest.first
-                        else if (start.x in selection.left..selection.right && start.y in selection.top..selection.bottom) CropHandle.Move
-                        else null
+                        handle = selection.hitHandle(point.x - rect.left, point.y - rect.top, rect.width, rect.height, 28.dp.toPx())
                     }) { change, amount ->
                         change.consume()
                         val rect = bounds()
                         val activeHandle = handle
-                        onCrop(if (activeHandle != null) currentCrop.drag(activeHandle, amount.x / rect.width, amount.y / rect.height)
-                        else normalized(change.position).let { cropBetween(start.x, start.y, it.x, it.y) })
+                        dragCrop = if (activeHandle != null) dragCrop.drag(activeHandle, amount.x / rect.width, amount.y / rect.height)
+                        else normalized(change.position).let { cropBetween(start.x, start.y, it.x, it.y) }
+                        onCrop(dragCrop)
                     }
                 }
             }) {
@@ -130,7 +129,17 @@ private fun CropEditor(bitmap: Bitmap, crop: ImageCrop, onCrop: (ImageCrop) -> U
                 rect.left + crop.right * rect.width, rect.top + crop.bottom * rect.height)
             clipRect(selection.left, selection.top, selection.right, selection.bottom) { drawImage(image, dstOffset = offset, dstSize = imageSize) }
             drawRect(Color.White, selection.topLeft, selection.size, style = Stroke(2.dp.toPx()))
-            listOf(selection.topLeft, selection.topRight, selection.bottomLeft, selection.bottomRight).forEach { drawCircle(Color.White, 7.dp.toPx(), it) }
+            listOf(selection.topLeft, selection.topRight, selection.bottomLeft, selection.bottomRight).forEach {
+                drawCircle(Color.White, 8.dp.toPx(), it)
+                drawCircle(handleColor, 4.dp.toPx(), it)
+            }
+            val halfHandle = 12.dp.toPx()
+            listOf(Offset(selection.center.x, selection.top), Offset(selection.center.x, selection.bottom)).forEach {
+                drawLine(Color.White, it - Offset(halfHandle, 0f), it + Offset(halfHandle, 0f), 4.dp.toPx(), StrokeCap.Round)
+            }
+            listOf(Offset(selection.left, selection.center.y), Offset(selection.right, selection.center.y)).forEach {
+                drawLine(Color.White, it - Offset(0f, halfHandle), it + Offset(0f, halfHandle), 4.dp.toPx(), StrokeCap.Round)
+            }
         }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("${((zoom * 10).roundToInt() / 10f)}×", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)

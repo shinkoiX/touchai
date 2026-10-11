@@ -28,6 +28,29 @@ class OpenAIChatViewModelTest {
     }
     private val completed = OpenAIStreamEvent.Completed(JsonObject(emptyMap()))
 
+    @Test fun sendingOrderFollowsSelectionAndReselectionWhileEvictionStillUsesAdditionOrder() = runTest {
+        val requests = mutableListOf<OpenAIRequest>()
+        val vm = testChatViewModel(history, Repository(settings), client { request ->
+            requests += request; flow { emit(completed) }
+        })
+        runCurrent()
+        val images = (1..4).map { OpenAIImage("data:image/png;base64,test-$it") }
+        images.take(3).forEach(vm::setImage)
+        val ids = vm.uiState.value.attachments.map { it.id }
+        ids.forEach(vm::toggleImageAttachment)
+        ids.reversed().forEach(vm::toggleImageAttachment)
+        assertEquals(images.take(3).reversed(), vm.uiState.value.sendingImages.map { it.image })
+        assertEquals(images.take(3), vm.uiState.value.attachments.map { it.image })
+        vm.toggleImageAttachment(ids[1]); vm.toggleImageAttachment(ids[1])
+        assertEquals(listOf(images[2], images[0], images[1]), vm.uiState.value.sendingImages.map { it.image })
+        vm.setImage(images[3])
+        assertEquals(images.takeLast(3), vm.uiState.value.attachments.map { it.image })
+        assertEquals(listOf(images[2], images[1], images[3]), vm.uiState.value.sendingImages.map { it.image })
+        vm.setPrompt("Compare"); vm.submit(); advanceUntilIdle()
+        assertEquals(listOf(images[2], images[1], images[3]), requests.single().messages.single().images)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+    }
+
     @Test fun imageQueueEvictsTheOldestAndSendsSelectedImagesInOrderThenClears() = runTest {
         val requests = mutableListOf<OpenAIRequest>()
         val vm = testChatViewModel(history, Repository(settings), client { request ->

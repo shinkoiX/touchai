@@ -61,6 +61,42 @@ class ChatFlowInstrumentedTest {
 
     @After fun cleanup() { compose.runOnUiThread { store.clear() }; events.close(); historyDirectory.deleteRecursively() }
 
+    @Test fun photoTapsToggleInclusionAndNumbersFollowSendingOrderWhileCropUsesItsButton() {
+        setup()
+        val first = Bitmap.createBitmap(100, 200, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+        val second = Bitmap.createBitmap(120, 180, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.GREEN) }
+        compose.runOnUiThread { viewModel.attachImage(first); viewModel.attachImage(second) }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages }
+        compose.onNodeWithText("1").assertExists()
+        compose.onNodeWithText("2").assertExists()
+        val before = viewModel.uiState.value.attachments
+        compose.onAllNodesWithContentDescription("Image preview").onFirst().performClick().assertIsNotSelected()
+        assertNull(viewModel.uiState.value.croppingImageId)
+        assertFalse(viewModel.uiState.value.attachments.first().attached)
+        compose.onNodeWithText("2").assertDoesNotExist()
+        compose.onNodeWithText("1").assertExists()
+        compose.onAllNodesWithContentDescription("Crop image").onFirst().performClick()
+        assertEquals(before.first().id, viewModel.uiState.value.croppingImageId)
+        assertFalse(viewModel.uiState.value.attachments.first().attached)
+        compose.onNodeWithContentDescription("Crop selection").assertExists()
+        compose.onNodeWithContentDescription("Cancel").performClick()
+        compose.onAllNodesWithContentDescription("Image preview").onFirst().performClick().assertIsSelected()
+        compose.onNodeWithText("2").assertExists()
+        compose.onAllNodesWithContentDescription("Remove image").onFirst().assertTextContains("2")
+        compose.onAllNodesWithContentDescription("Remove image").onLast().assertTextContains("1")
+        compose.mainClock.advanceTimeByFrame()
+        compose.waitForIdle()
+        val screenshot = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+        File(compose.activity.cacheDir, "selection-order.png").outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        screenshot.recycle()
+        compose.onNodeWithContentDescription("Send").performClick()
+        compose.waitUntil(5_000) { request != null }
+        assertEquals(listOf(before.last().image, before.first().image), request!!.messages.last().images)
+        events.trySend(OpenAIStreamEvent.Completed(JsonObject(emptyMap())))
+        events.close()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
+    }
+
     @Test fun screenshotsAndGalleryImagesShareTheLimitAndSendInOrder() {
         val screenshots = listOf(
             Bitmap.createBitmap(40, 60, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) },
