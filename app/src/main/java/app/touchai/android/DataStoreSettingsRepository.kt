@@ -50,6 +50,7 @@ class DataStoreSettingsRepository(
             } ?: defaults.presets,
             lastPresetId = prefs[LastPreset]?.takeIf(String::isNotEmpty) ?: if (prefs.contains(LastPreset)) null else defaults.lastPresetId,
             imageQuality = prefs[Quality]?.let(ImageQuality::valueOf) ?: defaults.imageQuality,
+            imageLimit = prefs[ImageLimit] ?: defaults.imageLimit,
             quickAccess = readQuickAccess(prefs),
         )
     }
@@ -80,6 +81,7 @@ class DataStoreSettingsRepository(
             val selected = prefs[LastPreset] ?: AppSettings().lastPresetId
             if (settings.presets.none { it.id == selected }) prefs[LastPreset] = ""
             prefs[Quality] = settings.imageQuality.name
+            prefs[ImageLimit] = settings.imageLimit
             prefs[FloatingButton] = settings.quickAccess.floatingButton
             prefs[CornerSwipe] = settings.quickAccess.cornerSwipe
             prefs[GestureCornerPosition] = settings.quickAccess.gestureCorner.name
@@ -164,6 +166,7 @@ class DataStoreSettingsRepository(
         // Keep the existing selection slot; it now tracks the most recent choice.
         val LastPreset = stringPreferencesKey("default_preset")
         val Quality = stringPreferencesKey("image_quality")
+        val ImageLimit = intPreferencesKey("image_limit")
         val FloatingButton = booleanPreferencesKey("floating_button")
         val CornerSwipe = booleanPreferencesKey("corner_swipe")
         val GestureCornerPosition = stringPreferencesKey("gesture_corner")

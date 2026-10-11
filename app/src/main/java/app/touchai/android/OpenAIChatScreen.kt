@@ -100,8 +100,9 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
         SettingsScreen(state, runtime, viewModel::saveSettings, viewModel::editSettings, viewModel::testConnection, { viewModel.showLogs(true) }) { viewModel.showSettings(false) }
         return
     }
-    if (state.cropping) {
-        ImageCropScreen(state.originalImage!!, state.imageCrop, viewModel::applyCrop, viewModel::closeCrop)
+    if (state.croppingImageId != null) {
+        val image = state.attachments.first { it.id == state.croppingImageId }
+        ImageCropScreen(image.original!!, image.crop, { viewModel.applyCrop(image.id, it) }, viewModel::closeCrop)
         return
     }
     val scrollState = rememberScrollState()
@@ -132,7 +133,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                     if (api.webSearch) AppIcon(R.drawable.ic_search, "Web search on", Modifier.padding(start = 4.dp), 14.dp, MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            AppIconButton(R.drawable.ic_add, "New chat", viewModel::newChat, enabled = !state.preparingImage && !loadingImage)
+            AppIconButton(R.drawable.ic_add, "New chat", viewModel::newChat, enabled = !state.preparingImages && !loadingImage && !state.capturingScreenshot)
             AppIconButton(R.drawable.ic_history, "Chat history", { keyboard?.hide(); viewModel.showHistory(true) }, enabled = state.ready)
             AppIconButton(R.drawable.ic_settings, "Settings", openSettings, enabled = !state.isStreaming && state.ready)
             onClose?.let { AppIconButton(R.drawable.ic_close, "Close", it) }
@@ -143,7 +144,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                     if (state.error == null) CircularProgressIndicator()
                     else FilledTonalButton(onClick = viewModel::loadSettings) { Text("Retry") }
                 }
-                state.turns.isEmpty() && state.imagePreview == null -> EmptyState(
+                state.turns.isEmpty() && state.attachments.isEmpty() -> EmptyState(
                     showSetup = !quickAccess.connected || (quickAccess.options.notification && !quickAccess.notificationsAllowed),
                     onSetup = openSettings,
                 )
@@ -153,10 +154,20 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                         UserMessage(turn)
                         AssistantMessage(turn, canRetry = index == state.turns.lastIndex && !state.isStreaming, onRetry = viewModel::retry)
                     }
-                    state.imagePreview?.let { bitmap ->
-                        Attachment(bitmap, maxHeight = if (compact) 160.dp else if (state.turns.isEmpty()) 440.dp else 280.dp,
-                            preparing = state.preparingImage, attached = state.imageAttached,
-                            onCrop = { keyboard?.hide(); viewModel.openCrop() }, onToggle = viewModel::toggleImageAttachment)
+                    val images = state.attachments.filter { it.preview != null }
+                    val imageScroll = rememberScrollState()
+                    LaunchedEffect(images.lastOrNull()?.id, imageScroll.maxValue) { imageScroll.scrollTo(imageScroll.maxValue) }
+                    BoxWithConstraints(Modifier.fillMaxWidth()) {
+                        val imageWidth = if (images.size > 1) 140.dp else maxWidth
+                        Row(Modifier.fillMaxWidth().horizontalScroll(imageScroll), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                            images.forEach { image -> key(image.id) {
+                                Attachment(image.preview!!, maxHeight = if (compact) 160.dp else if (images.size > 1) 240.dp else if (state.turns.isEmpty()) 440.dp else 280.dp,
+                                    preparing = image.preparing, attached = image.attached,
+                                    onCrop = { keyboard?.hide(); viewModel.openCrop(image.id) },
+                                    onToggle = { viewModel.toggleImageAttachment(image.id) }, onDelete = { viewModel.removeImage(image.id) },
+                                    modifier = Modifier.width(imageWidth))
+                            } }
+                        }
                     }
                 }
             }
@@ -176,7 +187,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                             attachmentMenuOpen = true
                         }, enabled = state.ready && !state.isStreaming && !loadingImage && !state.capturingScreenshot) {
                             if (loadingImage || state.capturingScreenshot) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-                            else AppIcon(R.drawable.ic_image, if (state.originalImage != null) "Replace image" else "Attach image")
+                            else AppIcon(R.drawable.ic_image, "Attach image")
                         }
                         if (attachmentMenuOpen) DropdownMenu(expanded = true, onDismissRequest = { attachmentMenuOpen = false }) {
                             DropdownMenuItem(text = { Text("Attach screenshot") }, onClick = {
@@ -201,8 +212,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                         if (state.isStreaming) FilledTonalIconButton(onClick = viewModel::cancel,
                             enabled = state.turns.last().status != TurnStatus.Cancelling) { AppIcon(R.drawable.ic_stop, "Stop") }
                         else FilledIconButton(onClick = send,
-                            enabled = state.ready && !loadingImage && !state.capturingScreenshot && (!state.imageAttached ||
-                                (!state.preparingImage && (state.originalImage == null || state.image != null)))) {
+                            enabled = state.ready && !loadingImage && !state.capturingScreenshot && state.canSendImages) {
                             AppIcon(R.drawable.ic_send, "Send", size = 20.dp)
                         }
                     }
@@ -364,9 +374,10 @@ private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> U
 }
 
 @Composable
-private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, attached: Boolean, onCrop: () -> Unit, onToggle: () -> Unit) {
+private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, attached: Boolean, onCrop: () -> Unit, onToggle: () -> Unit,
+    onDelete: () -> Unit, modifier: Modifier) {
     val shape = MaterialTheme.shapes.large
-    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Column(modifier, horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Box {
             Image(remember(bitmap) { bitmap.asImageBitmap() }, "Image preview",
                 Modifier.heightIn(min = 96.dp, max = maxHeight).widthIn(min = 96.dp)
@@ -383,6 +394,10 @@ private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, attach
                     stateDescription = if (attached) "Attached" else "Not attached"
                 }) {
                 Box(contentAlignment = Alignment.Center) { AppIcon(if (attached) R.drawable.ic_close else R.drawable.ic_add, null, size = 20.dp) }
+            }
+            Surface(onClick = onDelete, shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White,
+                modifier = Modifier.align(Alignment.BottomStart).padding(6.dp).size(28.dp).semantics { contentDescription = "Delete image" }) {
+                Box(contentAlignment = Alignment.Center) { AppIcon(R.drawable.ic_delete, null, size = 16.dp) }
             }
             Surface(shape = CircleShape, color = Color.Black.copy(alpha = 0.6f), contentColor = Color.White,
                 modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp).size(28.dp)) {

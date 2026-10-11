@@ -61,6 +61,55 @@ class ChatFlowInstrumentedTest {
 
     @After fun cleanup() { compose.runOnUiThread { store.clear() }; events.close(); historyDirectory.deleteRecursively() }
 
+    @Test fun screenshotsAndGalleryImagesShareTheLimitAndSendInOrder() {
+        val screenshots = listOf(
+            Bitmap.createBitmap(40, 60, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) },
+            Bitmap.createBitmap(60, 80, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) },
+        )
+        val gallery = listOf(
+            Bitmap.createBitmap(50, 70, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.GREEN) },
+            Bitmap.createBitmap(70, 90, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.YELLOW) },
+        )
+        var captures = 0
+        setup(captureScreenshot = { screenshots[captures++] })
+        compose.onNodeWithContentDescription("Attach image").performClick()
+        compose.onNodeWithText("Attach screenshot").performClick()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages && viewModel.uiState.value.attachments.size == 1 }
+        compose.runOnUiThread { viewModel.attachImage(gallery[0]) }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages }
+        val firstGalleryId = viewModel.uiState.value.attachments.last().id
+        val crop = ImageCrop(0.2f, 0.2f, 0.8f, 0.8f)
+        compose.runOnUiThread { viewModel.applyCrop(firstGalleryId, crop) }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages }
+        compose.onNodeWithContentDescription("Attach image").performClick()
+        compose.onNodeWithText("Attach screenshot").performClick()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages && viewModel.uiState.value.attachments.size == 3 }
+        compose.runOnUiThread { viewModel.attachImage(gallery[1]) }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages }
+        val retained = viewModel.uiState.value.attachments
+        assertEquals(listOf(gallery[0], screenshots[1], gallery[1]), retained.map { it.original })
+        assertEquals(listOf(false, true, false), retained.map { it.screenshot })
+        assertEquals(crop, retained.first().crop)
+        assertEquals(3, compose.onAllNodesWithContentDescription("Crop image").fetchSemanticsNodes().size)
+        val screenshot = androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().uiAutomation.takeScreenshot()
+        File(compose.activity.cacheDir, "multiple-images.png").outputStream().use { screenshot.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        screenshot.recycle()
+        compose.onNode(hasSetTextAction()).performTextReplacement("Keep the draft")
+        val chatId = viewModel.uiState.value.chatId
+        compose.runOnUiThread { viewModel.saveSettings(viewModel.uiState.value.settings.copy(imageLimit = 2)) }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.savingSettings }
+        assertEquals(chatId, viewModel.uiState.value.chatId)
+        assertEquals("Keep the draft", viewModel.uiState.value.prompt)
+        assertEquals(retained.takeLast(2), viewModel.uiState.value.attachments)
+        compose.onNodeWithContentDescription("Send").performClick()
+        compose.waitUntil(5_000) { request != null }
+        assertEquals(retained.takeLast(2).map { it.image }, request!!.messages.last().images)
+        assertTrue(viewModel.uiState.value.attachments.isEmpty())
+        events.trySend(OpenAIStreamEvent.Completed(JsonObject(emptyMap())))
+        events.close()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
+    }
+
     @Test fun attachScreenshotCapturesFreshImagesAndStaysAvailableAfterSendingAndReopeningChat() {
         val first = Bitmap.createBitmap(30, 40, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
         val second = Bitmap.createBitmap(50, 60, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
@@ -68,22 +117,22 @@ class ChatFlowInstrumentedTest {
         setup(screenshotOverride = false, captureScreenshot = { if (++captures == 1) first else second })
         compose.onNodeWithContentDescription("Attach image").performClick()
         compose.onNodeWithText("Attach screenshot").performClick()
-        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage && viewModel.uiState.value.image != null }
-        assertSame(first, viewModel.uiState.value.capturedScreenshot)
-        assertTrue(viewModel.uiState.value.imageAttached)
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages && viewModel.uiState.value.attachments.lastOrNull()?.image != null }
+        assertSame(first, viewModel.uiState.value.attachments.lastOrNull { it.screenshot }?.original)
+        assertTrue(viewModel.uiState.value.attachments.lastOrNull()?.attached == true)
         compose.onNodeWithContentDescription("Send").performClick()
         compose.waitUntil(5_000) { request != null }
         events.trySend(OpenAIStreamEvent.TextDelta("First answer"))
         events.trySend(OpenAIStreamEvent.Completed(JsonObject(emptyMap())))
         events.close()
         compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
-        assertNull(viewModel.uiState.value.capturedScreenshot)
+        assertNull(viewModel.uiState.value.attachments.lastOrNull { it.screenshot }?.original)
         compose.onNodeWithContentDescription("Attach image").performClick()
         compose.onNodeWithText("Attach screenshot").assertIsDisplayed()
         compose.onNodeWithText("Choose image").assertIsDisplayed()
         compose.onNodeWithText("Attach screenshot").performClick()
-        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage && viewModel.uiState.value.image != null }
-        assertSame(second, viewModel.uiState.value.capturedScreenshot)
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages && viewModel.uiState.value.attachments.lastOrNull()?.image != null }
+        assertSame(second, viewModel.uiState.value.attachments.lastOrNull { it.screenshot }?.original)
         val chatId = viewModel.uiState.value.chatId
         compose.runOnUiThread { viewModel.newChat() }
         compose.waitUntil(5_000) { viewModel.uiState.value.ready }
@@ -93,35 +142,35 @@ class ChatFlowInstrumentedTest {
         val before = viewModel.uiState.value
         compose.onNodeWithContentDescription("Attach image").performClick()
         compose.onNodeWithText("Attach screenshot").performClick()
-        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage && viewModel.uiState.value.image != null }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages && viewModel.uiState.value.attachments.lastOrNull()?.image != null }
         val after = viewModel.uiState.value
         assertEquals(3, captures)
-        assertSame(second, after.capturedScreenshot)
+        assertSame(second, after.attachments.lastOrNull { it.screenshot }?.original)
         assertEquals(chatId, after.chatId)
         assertEquals(before.turns, after.turns)
         assertEquals(before.selectedPreset, after.selectedPreset)
         assertEquals("Follow-up draft", after.prompt)
-        assertTrue(after.imageAttached)
+        assertTrue(after.attachments.lastOrNull()?.attached == true)
     }
 
     @Test fun failedRecaptureKeepsTheExistingImageCropAndDraft() {
         setup(captureScreenshot = { throw ScreenCaptureException("Protected screen") })
         val original = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
         compose.runOnUiThread { viewModel.captureOnInvocation { original } }
-        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage && viewModel.uiState.value.image != null }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages && viewModel.uiState.value.attachments.lastOrNull()?.image != null }
         val crop = ImageCrop(0.2f, 0.2f, 0.8f, 0.8f)
-        compose.runOnUiThread { viewModel.applyCrop(crop); viewModel.setPrompt("Keep this draft") }
-        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage }
+        compose.runOnUiThread { viewModel.applyCrop(viewModel.uiState.value.attachments.last().id, crop); viewModel.setPrompt("Keep this draft") }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages }
         val before = viewModel.uiState.value
-        compose.onNodeWithContentDescription("Replace image").performClick()
+        compose.onNodeWithContentDescription("Attach image").performClick()
         compose.onNodeWithText("Attach screenshot").performClick()
         compose.waitUntil(5_000) { viewModel.uiState.value.error == "Protected screen" }
         val after = viewModel.uiState.value
         assertFalse(after.capturingScreenshot)
-        assertSame(before.originalImage, after.originalImage)
-        assertSame(before.image, after.image)
-        assertSame(before.capturedScreenshot, after.capturedScreenshot)
-        assertEquals(crop, after.imageCrop)
+        assertSame(before.attachments.lastOrNull()?.original, after.attachments.lastOrNull()?.original)
+        assertSame(before.attachments.lastOrNull()?.image, after.attachments.lastOrNull()?.image)
+        assertSame(before.attachments.lastOrNull { it.screenshot }?.original, after.attachments.lastOrNull { it.screenshot }?.original)
+        assertEquals(crop, after.attachments.lastOrNull()?.crop)
         assertEquals(before.prompt, after.prompt)
         assertEquals(before.chatId, after.chatId)
     }
@@ -158,33 +207,33 @@ class ChatFlowInstrumentedTest {
         val bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
         var captures = 0
         compose.runOnUiThread { viewModel.captureOnInvocation { captures++; bitmap } }
-        compose.waitUntil(5_000) { viewModel.uiState.value.image != null && !viewModel.uiState.value.invoking }
-        assertFalse(viewModel.uiState.value.imageAttached)
+        compose.waitUntil(5_000) { viewModel.uiState.value.attachments.lastOrNull()?.image != null && !viewModel.uiState.value.invoking }
+        assertFalse(viewModel.uiState.value.attachments.lastOrNull()?.attached == true)
         compose.onNodeWithContentDescription("Crop image").assertExists()
         compose.onNodeWithContentDescription("Add image").assertIsNotSelected().performClick()
         compose.onNodeWithContentDescription("Remove image").assertIsSelected()
-        assertSame(bitmap, viewModel.uiState.value.originalImage)
-        compose.onNodeWithContentDescription("Remove image").performClick()
-        assertFalse(viewModel.uiState.value.imageAttached)
+        assertSame(bitmap, viewModel.uiState.value.attachments.lastOrNull()?.original)
+        compose.onAllNodesWithContentDescription("Remove image").onLast().performClick()
+        assertFalse(viewModel.uiState.value.attachments.lastOrNull()?.attached == true)
         compose.onNodeWithContentDescription("Crop image").assertExists()
-        assertSame(bitmap, viewModel.uiState.value.capturedScreenshot)
+        assertSame(bitmap, viewModel.uiState.value.attachments.lastOrNull { it.screenshot }?.original)
         compose.onNodeWithContentDescription("Add image").assertIsNotSelected().performClick()
-        assertTrue(viewModel.uiState.value.imageAttached)
+        assertTrue(viewModel.uiState.value.attachments.lastOrNull()?.attached == true)
         assertEquals(1, captures)
         compose.runOnUiThread { viewModel.newChat() }
         compose.waitUntil(5_000) { viewModel.uiState.value.ready }
-        assertNull(viewModel.uiState.value.capturedScreenshot)
+        assertNull(viewModel.uiState.value.attachments.lastOrNull { it.screenshot }?.original)
     }
 
     @Test fun manualScreenshotModeDoesNotIncludeAnUnattachedCaptureInRequests() {
         setup(attachScreenshots = false)
         compose.runOnUiThread { viewModel.captureOnInvocation { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) } }
-        compose.waitUntil(5_000) { viewModel.uiState.value.image != null && !viewModel.uiState.value.invoking }
+        compose.waitUntil(5_000) { viewModel.uiState.value.attachments.lastOrNull()?.image != null && !viewModel.uiState.value.invoking }
         compose.onNode(hasSetTextAction()).performTextReplacement("Only text")
         compose.onNodeWithContentDescription("Send").performClick()
         compose.waitUntil(5_000) { request != null }
         assertTrue(request!!.messages.last().images.isEmpty())
-        assertNull(viewModel.uiState.value.capturedScreenshot)
+        assertNull(viewModel.uiState.value.attachments.lastOrNull { it.screenshot }?.original)
         compose.runOnUiThread { viewModel.cancel() }
         compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
     }
@@ -192,9 +241,9 @@ class ChatFlowInstrumentedTest {
     @Test fun presetAlwaysAttachesScreenshotWhenGlobalSettingIsOff() {
         setup(attachScreenshots = false, screenshotOverride = true)
         compose.runOnUiThread { viewModel.captureOnInvocation { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) } }
-        compose.waitUntil(5_000) { viewModel.uiState.value.image != null && !viewModel.uiState.value.invoking }
+        compose.waitUntil(5_000) { viewModel.uiState.value.attachments.lastOrNull()?.image != null && !viewModel.uiState.value.invoking }
         compose.onNodeWithContentDescription("Remove image").assertIsSelected()
-        val image = viewModel.uiState.value.image
+        val image = viewModel.uiState.value.attachments.lastOrNull()?.image
         compose.onNodeWithContentDescription("Send").performClick()
         compose.waitUntil(5_000) { request != null }
         assertEquals(listOf(image), request!!.messages.last().images)
@@ -205,7 +254,7 @@ class ChatFlowInstrumentedTest {
     @Test fun presetNeverAttachesScreenshotWhenGlobalSettingIsOn() {
         setup(screenshotOverride = false)
         compose.runOnUiThread { viewModel.captureOnInvocation { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) } }
-        compose.waitUntil(5_000) { viewModel.uiState.value.image != null && !viewModel.uiState.value.invoking }
+        compose.waitUntil(5_000) { viewModel.uiState.value.attachments.lastOrNull()?.image != null && !viewModel.uiState.value.invoking }
         compose.onNodeWithContentDescription("Add image").assertIsNotSelected()
         compose.onNodeWithContentDescription("Send").performClick()
         compose.waitUntil(5_000) { request != null }
@@ -219,11 +268,11 @@ class ChatFlowInstrumentedTest {
         val bitmap = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
         var captures = 0
         compose.runOnUiThread { viewModel.captureOnInvocation { captures++; bitmap } }
-        compose.waitUntil(5_000) { viewModel.uiState.value.image != null && !viewModel.uiState.value.invoking }
+        compose.waitUntil(5_000) { viewModel.uiState.value.attachments.lastOrNull()?.image != null && !viewModel.uiState.value.invoking }
         val crop = ImageCrop(0.2f, 0.2f, 0.8f, 0.8f)
-        compose.runOnUiThread { viewModel.applyCrop(crop) }
-        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage }
-        val croppedImage = viewModel.uiState.value.image
+        compose.runOnUiThread { viewModel.applyCrop(viewModel.uiState.value.attachments.last().id, crop) }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages }
+        val croppedImage = viewModel.uiState.value.attachments.lastOrNull()?.image
         compose.onNodeWithText("No preset").performClick()
         compose.onNodeWithContentDescription("Remove image").assertIsSelected()
         compose.onNodeWithText("Custom", useUnmergedTree = true).performClick()
@@ -234,17 +283,17 @@ class ChatFlowInstrumentedTest {
         }
         compose.waitUntil(5_000) { !viewModel.uiState.value.savingSettings }
         compose.onNodeWithContentDescription("Remove image").assertIsSelected()
-        assertEquals(crop, viewModel.uiState.value.imageCrop)
-        assertSame(croppedImage, viewModel.uiState.value.image)
+        assertEquals(crop, viewModel.uiState.value.attachments.lastOrNull()?.crop)
+        assertSame(croppedImage, viewModel.uiState.value.attachments.lastOrNull()?.image)
         assertEquals(1, captures)
         val galleryImage = Bitmap.createBitmap(40, 40, Bitmap.Config.ARGB_8888)
         compose.runOnUiThread { viewModel.attachImage(galleryImage) }
-        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage }
-        compose.onNodeWithContentDescription("Remove image").performClick()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages }
+        compose.onAllNodesWithContentDescription("Remove image").onLast().performClick()
         compose.onNodeWithText("No preset").performClick()
         compose.onNodeWithText("Custom", useUnmergedTree = true).performClick()
         compose.onNodeWithContentDescription("Add image").assertIsNotSelected()
-        assertSame(galleryImage, viewModel.uiState.value.originalImage)
+        assertSame(galleryImage, viewModel.uiState.value.attachments.lastOrNull()?.original)
     }
 
     @Test fun cropPresetAndStreamingWorkTogether() {
@@ -257,7 +306,7 @@ class ChatFlowInstrumentedTest {
         compose.onNodeWithContentDescription("Crop image").performClick()
         compose.onNodeWithText("100 × 100 px").assertIsDisplayed()
         compose.onNodeWithText("Apply", useUnmergedTree = true).performClick()
-        compose.waitUntil(5_000) { viewModel.uiState.value.image != null }
+        compose.waitUntil(5_000) { viewModel.uiState.value.attachments.lastOrNull()?.image != null }
         compose.onNodeWithText("Custom", useUnmergedTree = true).performClick()
         compose.onNodeWithContentDescription("Send").performClick()
         compose.waitUntil(5_000) { request != null }
@@ -291,23 +340,23 @@ class ChatFlowInstrumentedTest {
         setup()
         val bitmap = Bitmap.createBitmap(100, 200, Bitmap.Config.ARGB_8888)
         compose.runOnUiThread { viewModel.captureOnInvocation { bitmap } }
-        compose.waitUntil(5_000) { viewModel.uiState.value.image != null }
+        compose.waitUntil(5_000) { viewModel.uiState.value.attachments.lastOrNull()?.image != null }
         assertEquals("Explain this image", viewModel.uiState.value.prompt)
-        compose.runOnUiThread { viewModel.applyCrop(ImageCrop(0.2f, 0.2f, 0.8f, 0.8f)) }
-        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage }
-        assertEquals(60, viewModel.uiState.value.imagePreview!!.width)
+        compose.runOnUiThread { viewModel.applyCrop(viewModel.uiState.value.attachments.last().id, ImageCrop(0.2f, 0.2f, 0.8f, 0.8f)) }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages }
+        assertEquals(60, viewModel.uiState.value.attachments.lastOrNull()?.preview!!.width)
         compose.onNodeWithContentDescription("Crop image").performClick()
         compose.onNodeWithText("60 × 120 px").assertIsDisplayed()
         compose.onNodeWithText("Reset", useUnmergedTree = true).performClick()
         compose.onNodeWithText("100 × 200 px").assertIsDisplayed()
         compose.onNodeWithContentDescription("Cancel").performClick()
-        assertEquals(60, viewModel.uiState.value.imagePreview!!.width)
+        assertEquals(60, viewModel.uiState.value.attachments.lastOrNull()?.preview!!.width)
         compose.onNodeWithContentDescription("Crop image").performClick()
         compose.onNodeWithText("Reset", useUnmergedTree = true).performClick()
         compose.onNodeWithText("Apply", useUnmergedTree = true).performClick()
-        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage }
-        assertEquals(100, viewModel.uiState.value.imagePreview!!.width)
-        assertEquals(200, viewModel.uiState.value.imagePreview!!.height)
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImages }
+        assertEquals(100, viewModel.uiState.value.attachments.lastOrNull()?.preview!!.width)
+        assertEquals(200, viewModel.uiState.value.attachments.lastOrNull()?.preview!!.height)
     }
 
     @Test fun withoutImageSendsNoImageContent() {

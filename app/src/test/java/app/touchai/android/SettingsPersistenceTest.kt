@@ -46,7 +46,7 @@ class SettingsPersistenceTest {
                 OpenAIModelConfig(apiKey = "another-preset-secret", model = "another-model", baseUrl = "https://preset.example.com/v1", webSearch = false), "Preset instructions")),
                 PromptPreset("always", "With screenshot", "Explain this screen", attachScreenshot = true),
                 PromptPreset("never", "Without screenshot", "Answer this question", attachScreenshot = false)),
-            lastPresetId = "test", imageQuality = ImageQuality.Original,
+            lastPresetId = "test", imageQuality = ImageQuality.Original, imageLimit = 7,
             quickAccess = QuickAccessSettings(floatingButton = false, notificationCaptureDelayMillis = 650,
                 buttonSizeDp = 80, attachScreenshotAutomatically = false, cornerSwipe = true,
                 cornerGestures = setOf(CornerGesture.SwipeUp, CornerGesture.DoubleTap),
@@ -57,6 +57,7 @@ class SettingsPersistenceTest {
             val store = PreferenceDataStoreFactory.create(scope = firstScope) { file }
             val repository = DataStoreSettingsRepository(store, cipher)
             assertEquals(QuickAccessSettings(), repository.load().quickAccess)
+            assertEquals(3, repository.load().imageLimit)
             repository.save(settings)
             repository.rememberPreset("test")
             assertEquals(settings, repository.load())

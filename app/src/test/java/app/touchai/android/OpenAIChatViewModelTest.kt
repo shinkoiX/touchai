@@ -28,6 +28,67 @@ class OpenAIChatViewModelTest {
     }
     private val completed = OpenAIStreamEvent.Completed(JsonObject(emptyMap()))
 
+    @Test fun imageQueueEvictsTheOldestAndSendsSelectedImagesInOrderThenClears() = runTest {
+        val requests = mutableListOf<OpenAIRequest>()
+        val vm = testChatViewModel(history, Repository(settings), client { request ->
+            requests += request; flow { emit(completed) }
+        })
+        runCurrent()
+        val images = (1..4).map { OpenAIImage("data:image/png;base64,test-$it") }
+        images.forEach(vm::setImage)
+        assertEquals(images.takeLast(3), vm.uiState.value.attachments.map { it.image })
+        vm.toggleImageAttachment(vm.uiState.value.attachments[1].id)
+        vm.setPrompt("Compare")
+        vm.submit(); advanceUntilIdle()
+        assertEquals(listOf(images[1], images[3]), requests.single().messages.single().images)
+        assertTrue(vm.uiState.value.attachments.isEmpty())
+        assertEquals(listOf(images[1], images[3]), history.chats.getValue(vm.uiState.value.chatId).turns.single().user.images)
+    }
+
+    @Test fun loweringImageLimitPreservesChatAndDraftAndDropsOldestImmediately() = runTest {
+        val repository = Repository(settings)
+        val vm = testChatViewModel(history, repository, client { flow { emit(completed) } })
+        runCurrent()
+        vm.setPrompt("First message"); vm.submit(); advanceUntilIdle()
+        val images = (1..3).map { OpenAIImage("data:image/png;base64,test-$it") }
+        images.forEach(vm::setImage)
+        vm.setPrompt("Follow-up draft")
+        val before = vm.uiState.value
+        vm.saveSettings(settings.copy(imageLimit = 2)); advanceUntilIdle()
+        val after = vm.uiState.value
+        assertEquals(2, repository.settings.imageLimit)
+        assertEquals(before.chatId, after.chatId)
+        assertEquals(before.turns, after.turns)
+        assertEquals(before.prompt, after.prompt)
+        assertEquals(before.attachments.takeLast(2), after.attachments)
+        vm.saveSettings(settings.copy(imageLimit = 5)); advanceUntilIdle()
+        assertEquals(after.attachments, vm.uiState.value.attachments)
+    }
+
+    @Test fun deletingOneQueuedImageLeavesTheOthersAvailableAndOrdered() = runTest {
+        val vm = testChatViewModel(history, Repository(settings), client { flow { emit(completed) } })
+        runCurrent()
+        val images = (1..3).map { OpenAIImage("data:image/png;base64,test-$it") }
+        images.forEach(vm::setImage)
+        vm.removeImage(vm.uiState.value.attachments[1].id)
+        assertEquals(listOf(images[0], images[2]), vm.uiState.value.attachments.map { it.image })
+        assertNull(settingsError(settings.copy(imageLimit = 1)))
+        assertNull(settingsError(settings.copy(imageLimit = 10)))
+        assertNotNull(settingsError(settings.copy(imageLimit = 0)))
+        assertNotNull(settingsError(settings.copy(imageLimit = 11)))
+    }
+
+    @Test fun reloadingSettingsAppliesTheSharedImageLimitToExistingAttachments() = runTest {
+        val repository = Repository(settings)
+        val vm = testChatViewModel(history, repository, client { flow { emit(completed) } })
+        runCurrent()
+        val images = (1..3).map { OpenAIImage("data:image/png;base64,test-$it") }
+        images.forEach(vm::setImage)
+        repository.settings = settings.copy(imageLimit = 1)
+        vm.loadSettings(); advanceUntilIdle()
+        assertEquals(listOf(images.last()), vm.uiState.value.attachments.map { it.image })
+    }
+
     @Test fun generatedImagesAreSavedReopenedAndIncludedInFollowUpContext() = runTest {
         val image = GeneratedImage("generated", OpenAIImage("data:image/png;base64,test"))
         val requests = mutableListOf<OpenAIRequest>()
@@ -56,13 +117,13 @@ class OpenAIChatViewModelTest {
         runCurrent()
         val image = OpenAIImage("data:image/png;base64,test")
         vm.setImage(image)
-        vm.removeImage()
-        assertSame(image, vm.uiState.value.image)
-        assertFalse(vm.uiState.value.imageAttached)
+        vm.toggleImageAttachment(vm.uiState.value.attachments.last().id)
+        assertSame(image, vm.uiState.value.attachments.lastOrNull()?.image)
+        assertFalse(vm.uiState.value.attachments.lastOrNull()?.attached == true)
         vm.setPrompt("Only text"); vm.submit(); advanceUntilIdle()
         assertTrue(requests.single().messages.single().images.isEmpty())
-        assertNull(vm.uiState.value.image)
-        assertFalse(vm.uiState.value.imageAttached)
+        assertNull(vm.uiState.value.attachments.lastOrNull()?.image)
+        assertFalse(vm.uiState.value.attachments.lastOrNull()?.attached == true)
     }
 
     @Test fun addToggleIncludesTheSamePreparedImageAndExcludedImageCannotSendAnEmptyMessage() = runTest {
@@ -72,13 +133,13 @@ class OpenAIChatViewModelTest {
         })
         runCurrent()
         val image = OpenAIImage("data:image/png;base64,test")
-        vm.setImage(image); vm.toggleImageAttachment(); vm.setPrompt("")
+        vm.setImage(image); vm.toggleImageAttachment(vm.uiState.value.attachments.last().id); vm.setPrompt("")
         vm.submit(); advanceUntilIdle()
         assertTrue(requests.isEmpty())
         assertNotNull(vm.uiState.value.error)
-        vm.toggleImageAttachment()
-        assertTrue(vm.uiState.value.imageAttached)
-        assertSame(image, vm.uiState.value.image)
+        vm.toggleImageAttachment(vm.uiState.value.attachments.last().id)
+        assertTrue(vm.uiState.value.attachments.lastOrNull()?.attached == true)
+        assertSame(image, vm.uiState.value.attachments.lastOrNull()?.image)
         vm.submit(); advanceUntilIdle()
         assertEquals(listOf(image), requests.single().messages.single().images)
     }
@@ -191,7 +252,7 @@ class OpenAIChatViewModelTest {
         advanceUntilIdle()
         assertFalse(vm.uiState.value.invoking)
         assertEquals("Protected screen", vm.uiState.value.error)
-        assertNull(vm.uiState.value.originalImage)
+        assertNull(vm.uiState.value.attachments.lastOrNull()?.original)
         vm.captureOnInvocation { captures++; throw ScreenCaptureException("Should not run") }
         advanceUntilIdle()
         assertEquals(1, captures)
@@ -230,8 +291,8 @@ class OpenAIChatViewModelTest {
         assertEquals(before.chatId, after.chatId)
         assertEquals(before.turns, after.turns)
         assertEquals(before.prompt, after.prompt)
-        assertSame(oldImage, after.image)
-        assertTrue(after.imageAttached)
+        assertSame(oldImage, after.attachments.lastOrNull()?.image)
+        assertTrue(after.attachments.lastOrNull()?.attached == true)
     }
 
     @Test fun unsavedSettingsDraftSurvivesReloadWithoutPersistingSecretsInSavedState() = runTest {
@@ -343,7 +404,7 @@ class OpenAIChatViewModelTest {
         assertTrue(vm.uiState.value.turns.isEmpty())
         vm.setImage(OpenAIImage("data:image/png;base64,dGVzdA=="))
         vm.newChat()
-        assertNull(vm.uiState.value.image)
+        assertNull(vm.uiState.value.attachments.lastOrNull()?.image)
     }
 
     @Test fun storageFailuresAreShownAndDoNotOverwriteCurrentSettings() = runTest {

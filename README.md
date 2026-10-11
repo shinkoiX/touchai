@@ -84,6 +84,12 @@ hides TouchAI and the keyboard, takes a fresh screenshot of the underlying scree
 then returns to the same chat with the new image attached. It preserves your draft,
 conversation, and selected preset. If capture fails, the previous attachment stays.
 
+Screenshots and gallery pictures share one ordered collection. **Settings → Image
+limit** sets its capacity from 1–10 images (3 by default). Adding an image beyond
+the limit removes the oldest; lowering the limit keeps the newest images. Each
+image can be cropped, included or excluded, or deleted separately. Included images
+are sent in collection order, and sending clears the pending collection.
+
 Responses image-generation results and Chat Completions `delta.images` data URLs
 appear directly in the assistant's message, including image-only replies.
 Tap a generated image to open its larger preview.
@@ -110,8 +116,8 @@ and replaces the editable message text with that preset’s prompt. Send uses th
 textbox exactly once; it does not append a hidden copy of the preset.
 
 Each invocation starts a fresh conversation. Settings changes also start a new
-conversation. Sent conversations are saved locally, including their attached images,
-answers, citations, and AI configuration. Use **Chat history** in the chat toolbar to
+conversation, except changing the image limit. Sent conversations are saved locally,
+including their attached images, answers, citations, and AI configuration. Use **Chat history** in the chat toolbar to
 reopen and continue a conversation or delete it. **New chat** keeps previous chats in
 history. Images appear inside sent messages; tap one to open a larger preview.
 Unsent drafts and attachments remain in memory only.

@@ -42,6 +42,17 @@ data class ChatTurn(
     val isRunning: Boolean get() = status in listOf(TurnStatus.Streaming, TurnStatus.Recovering, TurnStatus.Cancelling)
 }
 
+data class ImageAttachment(
+    val id: String = UUID.randomUUID().toString(),
+    val original: Bitmap? = null,
+    val preview: Bitmap? = original,
+    val image: OpenAIImage? = null,
+    val screenshot: Boolean = false,
+    val crop: ImageCrop = ImageCrop.Full,
+    val attached: Boolean = true,
+    val preparing: Boolean = false,
+)
+
 data class OpenAIChatUiState(
     val settings: AppSettings = AppSettings(),
     val ready: Boolean = false,
@@ -59,21 +70,17 @@ data class OpenAIChatUiState(
     val connectionResult: String? = null,
     val invoking: Boolean = false,
     val capturingScreenshot: Boolean = false,
-    val originalImage: Bitmap? = null,
-    val capturedScreenshot: Bitmap? = null,
-    val imageCrop: ImageCrop = ImageCrop.Full,
-    val cropping: Boolean = false,
-    val preparingImage: Boolean = false,
+    val attachments: List<ImageAttachment> = emptyList(),
+    val croppingImageId: String? = null,
     val prompt: String = "",
-    val image: OpenAIImage? = null,
-    val imageAttached: Boolean = false,
-    val imagePreview: Bitmap? = null,
     val selectedPreset: String? = null,
     val turns: List<ChatTurn> = emptyList(),
     val error: String? = null,
 ) {
     val isStreaming: Boolean get() = turns.lastOrNull()?.isRunning == true
     val selectedAi: AiConfiguration get() = settings.aiFor(selectedPreset)
+    val preparingImages: Boolean get() = attachments.any { it.preparing }
+    val canSendImages: Boolean get() = attachments.none { it.attached && (it.preparing || it.image == null) }
 }
 
 class OpenAIChatViewModel(
@@ -86,7 +93,7 @@ class OpenAIChatViewModel(
     private val _uiState = MutableStateFlow(OpenAIChatUiState(invoking = invoked))
     val uiState = _uiState.asStateFlow()
     private var requestUpdates: Job? = null
-    private var imageJob: Job? = null
+    private val imageJobs = mutableMapOf<String, Job>()
     private var captureJob: Job? = null
     private var captureRequested = false
     private var presetSaveJob: Job? = null
@@ -102,7 +109,10 @@ class OpenAIChatViewModel(
             try {
                 presetSaveJob?.join()
                 val settings = repository.load()
+                val images = _uiState.value.attachments.takeLast(settings.imageLimit)
+                cancelRemovedImages(images)
                 update { it.copy(settings = settings, ready = true, error = null,
+                    attachments = images, croppingImageId = it.croppingImageId?.takeIf { id -> images.any { image -> image.id == id } },
                     settingsDraft = if (it.settingsOpen && it.settingsDraft == it.settings) settings else it.settingsDraft,
                     selectedPreset = if (!it.ready) rememberedPreset(settings) else it.selectedPreset,
                     prompt = if (!it.ready) presetText(settings, rememberedPreset(settings)) else it.prompt) }
@@ -112,11 +122,12 @@ class OpenAIChatViewModel(
     }
 
     fun setPrompt(value: String) = update { it.copy(prompt = value) }
-    fun setImage(value: OpenAIImage?) = update { it.copy(image = value, imageAttached = value != null, imagePreview = null, error = null) }
+    fun setImage(value: OpenAIImage) = addAttachment(ImageAttachment(image = value))
     fun selectPreset(id: String?) {
         update { it.copy(selectedPreset = id, prompt = presetText(it.settings, id), settings = it.settings.copy(lastPresetId = id),
-            imageAttached = if (id != it.selectedPreset && it.capturedScreenshot != null && it.originalImage === it.capturedScreenshot)
-                it.settings.attachScreenshotFor(id) else it.imageAttached) }
+            attachments = if (id != it.selectedPreset) it.attachments.map { image ->
+                if (image.screenshot) image.copy(attached = it.settings.attachScreenshotFor(id)) else image
+            } else it.attachments) }
         presetSaveJob?.cancel()
         presetSaveJob = viewModelScope.launch {
             try { repository.rememberPreset(id) }
@@ -176,10 +187,9 @@ class OpenAIChatViewModel(
                 val chat = active?.state?.value ?: history.load(id)
                 val settings = repository.load()
                 val selected = chat.selectedPreset?.takeIf { id -> settings.presets.any { it.id == id } }
-                imageJob?.cancel()
+                clearImageJobs()
                 update { it.copy(chatId = chat.id, turns = chat.turns, settings = settings, ready = true,
-                    selectedPreset = selected, prompt = "", image = null, imageAttached = false, imagePreview = null, originalImage = null, capturedScreenshot = null,
-                    imageCrop = ImageCrop.Full, cropping = false, preparingImage = false, historyOpen = false) }
+                    selectedPreset = selected, prompt = "", attachments = emptyList(), croppingImageId = null, historyOpen = false) }
                 requestUpdates?.cancel()
                 active?.let(::observeRequest)
             } catch (error: CancellationException) { throw error }
@@ -218,26 +228,43 @@ class OpenAIChatViewModel(
         update { it.copy(invoking = true, settingsOpen = false, logsOpen = false, settingsDraft = null) }
         captureJob = viewModelScope.launch {
             requestUpdates?.cancel()
-            imageJob?.cancelAndJoin()
-            update { it.copy(chatId = UUID.randomUUID().toString(), turns = emptyList(), image = null, imageAttached = false, imagePreview = null, originalImage = null, capturedScreenshot = null,
-                cropping = false, preparingImage = false, error = null) }
+            imageJobs.values.toList().forEach { it.cancelAndJoin() }
+            imageJobs.clear()
+            update { it.copy(chatId = UUID.randomUUID().toString(), turns = emptyList(), attachments = emptyList(), croppingImageId = null, error = null) }
             try {
                 val bitmap = capture()
                 presetSaveJob?.join()
                 val settings = repository.load()
                 update { it.copy(settings = settings, ready = true, selectedPreset = rememberedPreset(settings),
-                    prompt = presetText(settings, rememberedPreset(settings)), invoking = false, capturedScreenshot = bitmap) }
-                attachImage(bitmap, attached = settings.attachScreenshotFor(rememberedPreset(settings)))
+                    prompt = presetText(settings, rememberedPreset(settings)), invoking = false) }
+                attachBitmap(bitmap, screenshot = true, attached = settings.attachScreenshotFor(rememberedPreset(settings)))
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { update { it.copy(invoking = false, error = error.message ?: "Screen capture failed. Continue without an image.") } }
         }
     }
 
-    fun attachImage(bitmap: Bitmap, attached: Boolean = true) {
-        imageJob?.cancel()
-        update { it.copy(originalImage = bitmap, imagePreview = bitmap, image = null, imageAttached = attached, imageCrop = ImageCrop.Full,
-            cropping = false, error = null) }
-        prepareImage(bitmap, ImageCrop.Full)
+    fun attachImage(bitmap: Bitmap) = attachBitmap(bitmap, screenshot = false)
+
+    private fun attachBitmap(bitmap: Bitmap, screenshot: Boolean, attached: Boolean = true) {
+        val image = ImageAttachment(original = bitmap, screenshot = screenshot, attached = attached)
+        addAttachment(image)
+        prepareImage(image.id)
+    }
+
+    private fun addAttachment(image: ImageAttachment) {
+        val images = (_uiState.value.attachments + image).takeLast(_uiState.value.settings.imageLimit)
+        cancelRemovedImages(images)
+        update { it.copy(attachments = images, croppingImageId = null, error = null) }
+    }
+
+    private fun cancelRemovedImages(images: List<ImageAttachment>) {
+        val retained = images.map { it.id }.toSet()
+        imageJobs.keys.filter { it !in retained }.forEach { imageJobs.remove(it)?.cancel() }
+    }
+
+    private fun clearImageJobs() {
+        imageJobs.values.forEach { it.cancel() }
+        imageJobs.clear()
     }
 
     fun attachScreenshot(capture: suspend () -> Bitmap) {
@@ -246,44 +273,52 @@ class OpenAIChatViewModel(
         captureJob = viewModelScope.launch {
             try {
                 val bitmap = capture()
-                imageJob?.cancelAndJoin()
-                update { it.copy(capturedScreenshot = bitmap) }
-                attachImage(bitmap)
+                attachBitmap(bitmap, screenshot = true)
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { reportError(error.message ?: "Screen capture failed. Try again.") }
             finally { update { it.copy(capturingScreenshot = false) } }
         }
     }
 
-    fun toggleImageAttachment() = update { it.copy(imageAttached = !it.imageAttached, error = null) }
-
-    fun openCrop() { update { it.copy(cropping = it.originalImage != null) } }
-    fun closeCrop() { update { it.copy(cropping = false) } }
-
-    fun applyCrop(crop: ImageCrop) {
-        val original = _uiState.value.originalImage ?: return
-        update { it.copy(cropping = false, imageCrop = crop) }
-        prepareImage(original, crop)
+    fun toggleImageAttachment(id: String) = update { state ->
+        state.copy(attachments = state.attachments.map { if (it.id == id) it.copy(attached = !it.attached) else it }, error = null)
     }
 
-    private fun prepareImage(original: Bitmap, crop: ImageCrop) {
-        imageJob?.cancel()
+    fun openCrop(id: String) = update { it.copy(croppingImageId = id) }
+    fun closeCrop() = update { it.copy(croppingImageId = null) }
+
+    fun applyCrop(id: String, crop: ImageCrop) {
+        updateImage(id) { it.copy(crop = crop) }
+        closeCrop()
+        prepareImage(id)
+    }
+
+    private fun prepareImage(id: String) {
+        imageJobs[id]?.cancel()
+        val image = _uiState.value.attachments.first { it.id == id }
         val quality = _uiState.value.settings.imageQuality
-        update { it.copy(preparingImage = true, image = null, error = null) }
-        imageJob = viewModelScope.launch {
+        updateImage(id) { it.copy(preparing = true, image = null) }
+        imageJobs[id] = viewModelScope.launch {
             try {
-                val prepared = ImageProcessor.prepare(original, crop, quality)
-                update { it.copy(image = prepared.input, imagePreview = prepared.preview, preparingImage = false) }
+                val prepared = ImageProcessor.prepare(image.original!!, image.crop, quality)
+                updateImage(id) { it.copy(image = prepared.input, preview = prepared.preview, preparing = false) }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
                 kotlinx.coroutines.currentCoroutineContext().ensureActive()
-                update { it.copy(preparingImage = false, error = "Could not prepare image: ${error.message}") }
+                updateImage(id) { it.copy(preparing = false) }
+                reportError("Could not prepare image: ${error.message}")
             }
         }
     }
 
-    fun removeImage() {
-        update { it.copy(imageAttached = false, cropping = false, error = null) }
+    private fun updateImage(id: String, transform: (ImageAttachment) -> ImageAttachment) = update { state ->
+        state.copy(attachments = state.attachments.map { if (it.id == id) transform(it) else it })
+    }
+
+    fun removeImage(id: String) {
+        imageJobs.remove(id)?.cancel()
+        update { it.copy(attachments = it.attachments.filterNot { image -> image.id == id },
+            croppingImageId = if (it.croppingImageId == id) null else it.croppingImageId, error = null) }
     }
 
     fun saveSettings(settings: AppSettings) {
@@ -302,18 +337,23 @@ class OpenAIChatViewModel(
                 repository.save(normalized)
                 val saved = repository.load()
                 val before = _uiState.value
+                val images = before.attachments.takeLast(saved.imageLimit)
+                cancelRemovedImages(images)
                 update { current ->
                     val selected = current.selectedPreset?.takeIf { id -> saved.presets.any { it.id == id } }
+                    val conversationChanged = saved.copy(imageLimit = current.settings.imageLimit) != current.settings
                     current.copy(settings = saved, ready = true, settingsOpen = false, settingsDraft = null,
-                        turns = if (saved == current.settings) current.turns else emptyList(), selectedPreset = selected,
-                        chatId = if (saved == current.settings) current.chatId else UUID.randomUUID().toString(),
-                        imageAttached = if (current.capturedScreenshot != null && current.originalImage === current.capturedScreenshot &&
-                            saved.attachScreenshotFor(selected) != current.settings.attachScreenshotFor(current.selectedPreset))
-                            saved.attachScreenshotFor(selected) else current.imageAttached,
+                        turns = if (conversationChanged) emptyList() else current.turns, selectedPreset = selected,
+                        chatId = if (conversationChanged) UUID.randomUUID().toString() else current.chatId,
+                        attachments = images.map { image ->
+                            if (image.screenshot && saved.attachScreenshotFor(selected) != current.settings.attachScreenshotFor(current.selectedPreset))
+                                image.copy(attached = saved.attachScreenshotFor(selected)) else image
+                        },
+                        croppingImageId = current.croppingImageId?.takeIf { id -> images.any { it.id == id } },
                         prompt = if (current.prompt == presetText(current.settings, current.selectedPreset)) presetText(saved, selected) else current.prompt)
                 }
                 if (saved.imageQuality != before.settings.imageQuality) {
-                    before.originalImage?.let { prepareImage(it, before.imageCrop) }
+                    images.filter { it.original != null }.forEach { prepareImage(it.id) }
                 }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { reportError("Could not save settings: ${error.message}") }
@@ -339,19 +379,19 @@ class OpenAIChatViewModel(
 
     fun submit() {
         val snapshot = _uiState.value
-        if (!snapshot.ready || snapshot.isStreaming || snapshot.savingSettings || snapshot.cropping || snapshot.capturingScreenshot ||
-            (snapshot.imageAttached && (snapshot.preparingImage || (snapshot.originalImage != null && snapshot.image == null)))) return
+        if (!snapshot.ready || snapshot.isStreaming || snapshot.savingSettings || snapshot.croppingImageId != null ||
+            snapshot.capturingScreenshot || !snapshot.canSendImages) return
         val ai = snapshot.selectedAi
         val error = apiError(ai.api, requireCredentials = true)
         if (error != null) { update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = error) }; return }
         val preset = snapshot.settings.presets.find { it.id == snapshot.selectedPreset }
         val prompt = snapshot.prompt.trim()
-        val image = snapshot.image.takeIf { snapshot.imageAttached }
-        if (prompt.isBlank() && image == null) { reportError("Enter a message, choose a preset, or attach an image."); return }
-        val user = ChatMessage(MessageRole.User, prompt, listOfNotNull(image))
-        imageJob?.cancel()
-        update { it.copy(prompt = "", image = null, imageAttached = false, imagePreview = null, originalImage = null, capturedScreenshot = null, imageCrop = ImageCrop.Full, error = null,
-            preparingImage = false, turns = it.turns + ChatTurn(user, ai, preset?.name)) }
+        val images = snapshot.attachments.filter { it.attached }.map { it.image!! }
+        if (prompt.isBlank() && images.isEmpty()) { reportError("Enter a message, choose a preset, or attach an image."); return }
+        val user = ChatMessage(MessageRole.User, prompt, images)
+        clearImageJobs()
+        update { it.copy(prompt = "", attachments = emptyList(), croppingImageId = null, error = null,
+            turns = it.turns + ChatTurn(user, ai, preset?.name)) }
         startRequest()
     }
 
@@ -401,11 +441,12 @@ class OpenAIChatViewModel(
 
     fun cancel() { requests.stop(_uiState.value.chatId) }
     fun newChat() {
-        if (_uiState.value.preparingImage || _uiState.value.historyLoading) return
+        if (_uiState.value.preparingImages || _uiState.value.historyLoading || _uiState.value.capturingScreenshot) return
         requestUpdates?.cancel()
+        clearImageJobs()
         showHistory(false)
-        update { it.copy(chatId = UUID.randomUUID().toString(), ready = false, turns = emptyList(), prompt = "", image = null, imageAttached = false, imagePreview = null,
-            originalImage = null, capturedScreenshot = null, imageCrop = ImageCrop.Full, cropping = false, error = null) }
+        update { it.copy(chatId = UUID.randomUUID().toString(), ready = false, turns = emptyList(), prompt = "", attachments = emptyList(),
+            croppingImageId = null, error = null) }
         loadSettings()
     }
 
@@ -419,6 +460,7 @@ private fun OpenAIModelConfig.normalized() = copy(baseUrl = baseUrl.trim().trimE
     reasoningEffort = reasoningEffort?.trim()?.takeIf(String::isNotEmpty))
 
 internal fun settingsError(settings: AppSettings): String? {
+    if (settings.imageLimit !in 1..10) return "Image limit must be between 1 and 10."
     if (settings.quickAccess.cornerSwipe && settings.quickAccess.cornerGestures.isEmpty()) return "Select at least one corner gesture."
     apiError(settings.api, requireCredentials = false)?.let { return "Default AI: $it" }
     settings.presets.forEach { preset ->

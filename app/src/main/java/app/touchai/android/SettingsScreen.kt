@@ -13,6 +13,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
@@ -22,6 +24,7 @@ import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.ChatGptOAuth
 import app.touchai.core.openai.OpenAIModelConfig
 import java.util.UUID
+import kotlin.math.roundToInt
 
 @Composable
 fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave: (AppSettings) -> Unit,
@@ -56,6 +59,14 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
             Column {
                 SectionHeader("Image size")
                 Choices(ImageQuality.entries, { it == draft.imageQuality }, { it.label }) { onDraftChange(draft.copy(imageQuality = it)) }
+            }
+            Column {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("Image limit", style = MaterialTheme.typography.titleSmall)
+                    Text(draft.imageLimit.toString(), style = MaterialTheme.typography.bodyMedium)
+                }
+                Slider(draft.imageLimit.toFloat(), { onDraftChange(draft.copy(imageLimit = it.roundToInt())) },
+                    valueRange = 1f..10f, steps = 8, modifier = Modifier.semantics { contentDescription = "Image limit" })
             }
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 SectionHeader("Presets", Modifier.padding(bottom = 0.dp))
