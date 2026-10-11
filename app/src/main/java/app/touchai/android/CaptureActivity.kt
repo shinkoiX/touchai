@@ -30,7 +30,8 @@ class CaptureActivity : ComponentActivity() {
                 if (!state.invoking) {
                     key(state.chatId) {
                         QuickChatPanel(onClose = ::finish, onOpenApp = ::openInApp, onCollapse = ::collapseChat) {
-                            OpenAIChatScreen(viewModel, app.quickAccess, onClose = ::finish)
+                            OpenAIChatScreen(viewModel, app.quickAccess,
+                                captureScreenshot = { captureThroughTransparentWindow { app.quickAccess.capture(false) } }, onClose = ::finish)
                         }
                     }
                 }

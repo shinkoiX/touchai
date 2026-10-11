@@ -205,6 +205,35 @@ class OpenAIChatViewModelTest {
         assertTrue(vm.uiState.value.turns.single().user.images.isEmpty())
     }
 
+    @Test fun recaptureRejectsDuplicateRequestsAndPreservesTheConversationOnFailure() = runTest {
+        val vm = testChatViewModel(history, Repository(settings), client { flow { emit(completed) } })
+        runCurrent()
+        vm.setPrompt("First message"); vm.submit(); advanceUntilIdle()
+        vm.setPrompt("Follow-up draft")
+        val oldImage = OpenAIImage("data:image/png;base64,test")
+        vm.setImage(oldImage)
+        val before = vm.uiState.value
+        val gate = CompletableDeferred<Unit>()
+        var captures = 0
+        vm.attachScreenshot { captures++; gate.await(); throw ScreenCaptureException("Protected screen") }
+        runCurrent()
+        assertTrue(vm.uiState.value.capturingScreenshot)
+        vm.attachScreenshot { captures++; throw ScreenCaptureException("Duplicate capture") }
+        vm.submit()
+        runCurrent()
+        assertEquals(before.turns, vm.uiState.value.turns)
+        gate.complete(Unit); advanceUntilIdle()
+        val after = vm.uiState.value
+        assertEquals(1, captures)
+        assertFalse(after.capturingScreenshot)
+        assertEquals("Protected screen", after.error)
+        assertEquals(before.chatId, after.chatId)
+        assertEquals(before.turns, after.turns)
+        assertEquals(before.prompt, after.prompt)
+        assertSame(oldImage, after.image)
+        assertTrue(after.imageAttached)
+    }
+
     @Test fun unsavedSettingsDraftSurvivesReloadWithoutPersistingSecretsInSavedState() = runTest {
         val vm = testChatViewModel(history, Repository(settings), client { flow { emit(completed) } })
         runCurrent()

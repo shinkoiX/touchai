@@ -59,7 +59,8 @@ class ChatHistoryTransferInstrumentedTest {
                 if (state.historyOpen) ChatHistoryScreen(state, viewModel::openChat, viewModel::deleteChat, viewModel::newChat,
                     { viewModel.showHistory(true) }, { viewModel.exportHistory { output } },
                     { viewModel.importHistory { output.toByteArray().inputStream() } }, { viewModel.showHistory(false) })
-                else OpenAIChatScreen(viewModel, (compose.activity.application as TouchAiApplication).quickAccess)
+                else OpenAIChatScreen(viewModel, (compose.activity.application as TouchAiApplication).quickAccess,
+                    captureScreenshot = { error("This test does not capture screenshots") })
             }
         }
         compose.waitUntil(5_000) { !viewModel.uiState.value.historyLoading && viewModel.uiState.value.historyEntries.size == 1 }

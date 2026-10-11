@@ -54,7 +54,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 @Composable
-fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime, onClose: (() -> Unit)? = null) {
+fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime,
+    captureScreenshot: suspend () -> Bitmap, onClose: (() -> Unit)? = null) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val quickAccess by runtime.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
@@ -172,15 +173,15 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                 Row(Modifier.padding(4.dp), verticalAlignment = Alignment.Bottom) {
                     Box(Modifier.padding(bottom = 4.dp)) {
                         IconButton(onClick = {
-                            if (state.capturedScreenshot != null) attachmentMenuOpen = true else picker.launch("image/*")
-                        }, enabled = state.ready && !state.isStreaming && !loadingImage) {
-                            if (loadingImage) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                            attachmentMenuOpen = true
+                        }, enabled = state.ready && !state.isStreaming && !loadingImage && !state.capturingScreenshot) {
+                            if (loadingImage || state.capturingScreenshot) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                             else AppIcon(R.drawable.ic_image, if (state.originalImage != null) "Replace image" else "Attach image")
                         }
-                        DropdownMenu(expanded = attachmentMenuOpen, onDismissRequest = { attachmentMenuOpen = false }) {
+                        if (attachmentMenuOpen) DropdownMenu(expanded = true, onDismissRequest = { attachmentMenuOpen = false }) {
                             DropdownMenuItem(text = { Text("Attach screenshot") }, onClick = {
                                 attachmentMenuOpen = false
-                                viewModel.attachScreenshot()
+                                viewModel.attachScreenshot(captureScreenshot)
                             })
                             DropdownMenuItem(text = { Text("Choose image") }, onClick = {
                                 attachmentMenuOpen = false
@@ -200,7 +201,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                         if (state.isStreaming) FilledTonalIconButton(onClick = viewModel::cancel,
                             enabled = state.turns.last().status != TurnStatus.Cancelling) { AppIcon(R.drawable.ic_stop, "Stop") }
                         else FilledIconButton(onClick = send,
-                            enabled = state.ready && !loadingImage && (!state.imageAttached ||
+                            enabled = state.ready && !loadingImage && !state.capturingScreenshot && (!state.imageAttached ||
                                 (!state.preparingImage && (state.originalImage == null || state.image != null)))) {
                             AppIcon(R.drawable.ic_send, "Send", size = 20.dp)
                         }

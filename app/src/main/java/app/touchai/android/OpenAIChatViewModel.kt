@@ -58,6 +58,7 @@ data class OpenAIChatUiState(
     val testingConnection: Boolean = false,
     val connectionResult: String? = null,
     val invoking: Boolean = false,
+    val capturingScreenshot: Boolean = false,
     val originalImage: Bitmap? = null,
     val capturedScreenshot: Bitmap? = null,
     val imageCrop: ImageCrop = ImageCrop.Full,
@@ -239,7 +240,20 @@ class OpenAIChatViewModel(
         prepareImage(bitmap, ImageCrop.Full)
     }
 
-    fun attachScreenshot() { _uiState.value.capturedScreenshot?.let { attachImage(it) } }
+    fun attachScreenshot(capture: suspend () -> Bitmap) {
+        if (captureJob?.isActive == true) return
+        update { it.copy(capturingScreenshot = true, error = null) }
+        captureJob = viewModelScope.launch {
+            try {
+                val bitmap = capture()
+                imageJob?.cancelAndJoin()
+                update { it.copy(capturedScreenshot = bitmap) }
+                attachImage(bitmap)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { reportError(error.message ?: "Screen capture failed. Try again.") }
+            finally { update { it.copy(capturingScreenshot = false) } }
+        }
+    }
 
     fun toggleImageAttachment() = update { it.copy(imageAttached = !it.imageAttached, error = null) }
 
@@ -325,7 +339,7 @@ class OpenAIChatViewModel(
 
     fun submit() {
         val snapshot = _uiState.value
-        if (!snapshot.ready || snapshot.isStreaming || snapshot.savingSettings || snapshot.cropping ||
+        if (!snapshot.ready || snapshot.isStreaming || snapshot.savingSettings || snapshot.cropping || snapshot.capturingScreenshot ||
             (snapshot.imageAttached && (snapshot.preparingImage || (snapshot.originalImage != null && snapshot.image == null)))) return
         val ai = snapshot.selectedAi
         val error = apiError(ai.api, requireCredentials = true)

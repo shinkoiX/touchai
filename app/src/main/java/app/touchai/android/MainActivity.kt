@@ -27,7 +27,10 @@ class MainActivity : ComponentActivity() {
         setContent {
             TouchAiTheme {
                 Surface(Modifier.fillMaxSize()) {
-                    viewModel?.let { model -> key(model) { OpenAIChatScreen(model, app.quickAccess) } }
+                    viewModel?.let { model -> key(model) {
+                        OpenAIChatScreen(model, app.quickAccess,
+                            captureScreenshot = { captureUnderlyingScreen { app.quickAccess.capture(false) } })
+                    } }
                 }
             }
         }

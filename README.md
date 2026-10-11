@@ -78,6 +78,12 @@ notifications to be dismissed; reopening TouchAI restores an enabled notificatio
 
 ## Images and conversations
 
+The image button always offers **Attach screenshot** and **Choose image**, including
+after sending a message or reopening a saved chat. **Attach screenshot** temporarily
+hides TouchAI and the keyboard, takes a fresh screenshot of the underlying screen,
+then returns to the same chat with the new image attached. It preserves your draft,
+conversation, and selected preset. If capture fails, the previous attachment stays.
+
 Responses image-generation results and Chat Completions `delta.images` data URLs
 appear directly in the assistant's message, including image-only replies.
 Tap a generated image to open its larger preview.

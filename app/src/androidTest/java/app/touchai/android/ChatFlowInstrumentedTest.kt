@@ -34,7 +34,8 @@ class ChatFlowInstrumentedTest {
     private var configuration: OpenAIModelConfig? = null
     private val custom = AiConfiguration(OpenAIModelConfig(apiKey = "test-only", model = "custom-model", webSearch = false))
 
-    private fun setup(attachScreenshots: Boolean = true, screenshotOverride: Boolean? = null) {
+    private fun setup(attachScreenshots: Boolean = true, screenshotOverride: Boolean? = null,
+        captureScreenshot: suspend () -> Bitmap = { Bitmap.createBitmap(20, 20, Bitmap.Config.ARGB_8888) }) {
         var storedSettings = AppSettings(
             api = OpenAIModelConfig(apiKey = "test-only", model = "default-model"),
             presets = listOf(PromptPreset("custom", "Custom", "Explain this image", custom, attachScreenshot = screenshotOverride)),
@@ -52,11 +53,78 @@ class ChatFlowInstrumentedTest {
             }
         }
         compose.runOnUiThread { viewModel = testChatViewModel(history, repository, client); store.put("test", viewModel) }
-        compose.setContent { TouchAiTheme { OpenAIChatScreen(viewModel, (compose.activity.application as TouchAiApplication).quickAccess) } }
+        compose.setContent { TouchAiTheme {
+            OpenAIChatScreen(viewModel, (compose.activity.application as TouchAiApplication).quickAccess, captureScreenshot)
+        } }
         compose.waitUntil(5_000) { viewModel.uiState.value.ready }
     }
 
     @After fun cleanup() { compose.runOnUiThread { store.clear() }; events.close(); historyDirectory.deleteRecursively() }
+
+    @Test fun attachScreenshotCapturesFreshImagesAndStaysAvailableAfterSendingAndReopeningChat() {
+        val first = Bitmap.createBitmap(30, 40, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
+        val second = Bitmap.createBitmap(50, 60, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+        var captures = 0
+        setup(screenshotOverride = false, captureScreenshot = { if (++captures == 1) first else second })
+        compose.onNodeWithContentDescription("Attach image").performClick()
+        compose.onNodeWithText("Attach screenshot").performClick()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage && viewModel.uiState.value.image != null }
+        assertSame(first, viewModel.uiState.value.capturedScreenshot)
+        assertTrue(viewModel.uiState.value.imageAttached)
+        compose.onNodeWithContentDescription("Send").performClick()
+        compose.waitUntil(5_000) { request != null }
+        events.trySend(OpenAIStreamEvent.TextDelta("First answer"))
+        events.trySend(OpenAIStreamEvent.Completed(JsonObject(emptyMap())))
+        events.close()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
+        assertNull(viewModel.uiState.value.capturedScreenshot)
+        compose.onNodeWithContentDescription("Attach image").performClick()
+        compose.onNodeWithText("Attach screenshot").assertIsDisplayed()
+        compose.onNodeWithText("Choose image").assertIsDisplayed()
+        compose.onNodeWithText("Attach screenshot").performClick()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage && viewModel.uiState.value.image != null }
+        assertSame(second, viewModel.uiState.value.capturedScreenshot)
+        val chatId = viewModel.uiState.value.chatId
+        compose.runOnUiThread { viewModel.newChat() }
+        compose.waitUntil(5_000) { viewModel.uiState.value.ready }
+        compose.runOnUiThread { viewModel.openChat(chatId) }
+        compose.waitUntil(5_000) { viewModel.uiState.value.chatId == chatId && !viewModel.uiState.value.historyLoading }
+        compose.onNode(hasSetTextAction()).performTextReplacement("Follow-up draft")
+        val before = viewModel.uiState.value
+        compose.onNodeWithContentDescription("Attach image").performClick()
+        compose.onNodeWithText("Attach screenshot").performClick()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage && viewModel.uiState.value.image != null }
+        val after = viewModel.uiState.value
+        assertEquals(3, captures)
+        assertSame(second, after.capturedScreenshot)
+        assertEquals(chatId, after.chatId)
+        assertEquals(before.turns, after.turns)
+        assertEquals(before.selectedPreset, after.selectedPreset)
+        assertEquals("Follow-up draft", after.prompt)
+        assertTrue(after.imageAttached)
+    }
+
+    @Test fun failedRecaptureKeepsTheExistingImageCropAndDraft() {
+        setup(captureScreenshot = { throw ScreenCaptureException("Protected screen") })
+        val original = Bitmap.createBitmap(100, 100, Bitmap.Config.ARGB_8888)
+        compose.runOnUiThread { viewModel.captureOnInvocation { original } }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage && viewModel.uiState.value.image != null }
+        val crop = ImageCrop(0.2f, 0.2f, 0.8f, 0.8f)
+        compose.runOnUiThread { viewModel.applyCrop(crop); viewModel.setPrompt("Keep this draft") }
+        compose.waitUntil(5_000) { !viewModel.uiState.value.preparingImage }
+        val before = viewModel.uiState.value
+        compose.onNodeWithContentDescription("Replace image").performClick()
+        compose.onNodeWithText("Attach screenshot").performClick()
+        compose.waitUntil(5_000) { viewModel.uiState.value.error == "Protected screen" }
+        val after = viewModel.uiState.value
+        assertFalse(after.capturingScreenshot)
+        assertSame(before.originalImage, after.originalImage)
+        assertSame(before.image, after.image)
+        assertSame(before.capturedScreenshot, after.capturedScreenshot)
+        assertEquals(crop, after.imageCrop)
+        assertEquals(before.prompt, after.prompt)
+        assertEquals(before.chatId, after.chatId)
+    }
 
     @Test fun generatedImageOnlyReplyIsVisibleAndSurvivesHistoryReopening() {
         setup()
