@@ -16,6 +16,9 @@ Android 11 or later and is intended for personal use as a sideloaded APK.
 4. In **Connections**, add each API key or ChatGPT account once. An **API key**
    connection holds the base URL, API protocol, and key; a **ChatGPT** connection
    uses **Continue with ChatGPT**. Keys are encrypted and stored only here.
+   New connections use the **Responses** protocol. For a Google AI Studio key,
+   choose **Gemini**; the base URL becomes
+   `https://generativelanguage.googleapis.com/v1beta` (see *Web search* below).
 5. In **Default AI**, choose a connection, then set the model, reasoning effort,
    general instructions, and web search. Use Test connection to check it.
 6. Edit the presets. Each preset can use the default AI configuration or turn on
@@ -346,3 +349,18 @@ portrait/landscape transitions. Android's legacy `uiautomator dump` can temporar
 suspend accessibility services; avoid using it during capture verification.
 Instrumentation can also leave a previously enabled accessibility service awaiting
 reconnection; toggle it off and on in Android settings after testing if necessary.
+
+### Web search by provider
+
+Web search uses each provider's own search tool, so pick the protocol that supports it:
+
+| Provider | Protocol | Search tool sent |
+|---|---|---|
+| OpenAI | **Responses** | `web_search` tool; works with standard models |
+| OpenAI | Chat Completions | `web_search_options`; only OpenAI's search models accept it |
+| Google Gemini (AI Studio key) | **Gemini** | `google_search` via Google's Interactions API |
+
+Google's OpenAI-compatible endpoint (`…/v1beta/openai`) does not offer Google Search
+for chat, and other Chat Completions providers usually reject `web_search_options`;
+turn **Web search** off for those, or switch the connection's protocol.
+

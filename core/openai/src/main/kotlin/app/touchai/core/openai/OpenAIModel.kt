@@ -45,7 +45,7 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
     private fun createStream(config: OpenAIModelConfig, request: OpenAIRequest, onCheckpoint: (String) -> Unit): Flow<OpenAIStreamEvent> = flow {
         var responseId: String? = null
         httpClient.preparePost(buildRequestUrl(config)) {
-            header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+            authorize(config)
             accept(ContentType.Text.EventStream)
             contentType(ContentType.Application.Json)
             timeout { requestTimeoutMillis = config.timeoutMillis }
@@ -54,14 +54,8 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
             if (!response.status.isSuccess()) {
                 val body = response.bodyAsText()
                 emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(body)))
-                val message = try {
-                    (Json.parseToJsonElement(body).jsonObject["error"] as? JsonObject)?.string("message")
-                } catch (_: SerializationException) {
-                    null
-                } catch (_: IllegalArgumentException) {
-                    null
-                }
-                throw OpenAIRequestException("HTTP ${response.status.value}: ${message ?: response.status.description}", response.status.value)
+                val message = errorMessage(body) ?: response.status.description.takeIf(String::isNotBlank)
+                throw OpenAIRequestException(listOfNotNull("HTTP ${response.status.value}", message).joinToString(": "), response.status.value)
             }
             val responseType = response.contentType()
             if (responseType != null && !responseType.match(ContentType.Text.EventStream)) {
@@ -280,7 +274,70 @@ private fun decodeStreamPayload(protocol: ApiProtocol, payload: JsonObject, name
     return when (protocol) {
         ApiProtocol.ChatCompletions -> decodeChatEvent(payload)
         ApiProtocol.Responses -> decodeResponseEvent(payload, name)
+        ApiProtocol.Gemini -> decodeGeminiEvent(payload, name)
     }
+}
+
+/** Reads `{"error":{"message":…}}`, including Google's variant wrapped in an array. */
+internal fun errorMessage(body: String): String? = try {
+    val root = Json.parseToJsonElement(body)
+    val value = (root as? JsonArray)?.firstOrNull() ?: root
+    ((value as? JsonObject)?.get("error") as? JsonObject)?.string("message")?.takeIf(String::isNotBlank)
+} catch (_: SerializationException) {
+    null
+} catch (_: IllegalArgumentException) {
+    null
+}
+
+private fun decodeGeminiEvent(payload: JsonObject, name: String?): DecodedEvent =
+    when (payload.string("event_type") ?: name) {
+        "step.start" -> when ((payload["step"] as? JsonObject)?.string("type")) {
+            "google_search_call" -> DecodedEvent(searchStatus = "Searching the web…")
+            "google_search_result" -> DecodedEvent(searchStatus = "Web search complete")
+            else -> DecodedEvent()
+        }
+        "step.delta" -> {
+            val delta = payload["delta"] as? JsonObject
+            // Google documents byte offsets for citations, so they are kept as sources without text positions.
+            val citations = parseCitations(delta?.get("annotations"), textOffset = null) +
+                parseCitations(delta?.takeIf { it.string("type") == "url_citation" }?.let { JsonArray(listOf(it)) }, textOffset = null)
+            when (delta?.string("type")) {
+                "text" -> DecodedEvent(deltas = listOfNotNull(delta.string("text")), citations = citations)
+                "google_search_call" -> DecodedEvent(searchStatus = "Searching the web…")
+                "google_search_result" -> DecodedEvent(searchStatus = "Web search complete")
+                else -> DecodedEvent(citations = citations)
+            }
+        }
+        "interaction.created", "interaction.status_update", "interaction.completed" -> {
+            val interaction = payload["interaction"] as? JsonObject
+            val status = interaction?.string("status") ?: payload.string("status")
+            val output = interaction?.let(::readInteractionOutput)
+            when (status) {
+                "completed" -> DecodedEvent(completed = interaction ?: payload, citations = output?.citations.orEmpty(),
+                    finalText = output?.text?.takeIf(String::isNotEmpty))
+                "failed" -> DecodedEvent(failure = OpenAIRequestException(
+                    ((interaction?.get("errors") as? JsonArray)?.firstOrNull() as? JsonObject)?.string("message") ?: "The Gemini request failed."))
+                "incomplete" -> DecodedEvent(failure = incomplete("the model reached its output limit"))
+                "cancelled" -> DecodedEvent(failure = OpenAIRequestException("The provider cancelled this response."))
+                "requires_action" -> DecodedEvent(failure = incomplete("tool_calls"))
+                else -> DecodedEvent()
+            }
+        }
+        null -> throw OpenAIStreamException("Expected Gemini events. Check the API protocol.")
+        else -> DecodedEvent() // step.stop, thoughts and other lifecycle events do not change the answer.
+    }
+
+/** Text and citations from a Gemini interaction's `model_output` steps. */
+fun readInteractionOutput(interaction: JsonObject): ResponseOutput {
+    val text = StringBuilder()
+    val citations = mutableListOf<WebCitation>()
+    (interaction["steps"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.filter { it.string("type") == "model_output" }.forEach { step ->
+        (step["content"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.filter { it.string("type") == "text" }.forEach { part ->
+            text.append(part.string("text").orEmpty())
+            citations += parseCitations(part["annotations"], textOffset = null)
+        }
+    }
+    return ResponseOutput(text.toString(), emptyList(), citations)
 }
 
 private fun decodeChatEvent(payload: JsonObject): DecodedEvent {

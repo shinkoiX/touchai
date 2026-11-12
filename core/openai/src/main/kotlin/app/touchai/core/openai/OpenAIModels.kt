@@ -6,7 +6,12 @@ import kotlinx.serialization.json.*
 enum class ApiProtocol(val label: String, val path: String) {
     ChatCompletions("Chat Completions", "chat/completions"),
     Responses("Responses", "responses"),
+    /** Google's Interactions API, which supports Google Search grounding. */
+    Gemini("Gemini", "interactions"),
 }
+
+/** Base URL for Google's native Gemini API, used with [ApiProtocol.Gemini]. */
+const val GeminiBaseUrl = "https://generativelanguage.googleapis.com/v1beta"
 
 enum class AuthenticationMethod(val label: String) { ApiKey("API key"), ChatGpt("ChatGPT") }
 
@@ -23,7 +28,7 @@ data class OpenAIModelConfig(
     val chatGptAccountId: String? = null,
 ) {
     val requestProtocol: ApiProtocol get() = if (authentication == AuthenticationMethod.ChatGpt) ApiProtocol.Responses else protocol
-    val recoverResponses: Boolean get() = authentication == AuthenticationMethod.ApiKey && backgroundResponses
+    val recoverResponses: Boolean get() = authentication == AuthenticationMethod.ApiKey && protocol == ApiProtocol.Responses && backgroundResponses
 }
 
 data class OpenAIImage(val url: String, val detail: String = "auto")
@@ -84,8 +89,17 @@ fun buildRequestUrl(config: OpenAIModelConfig): String =
     if (config.authentication == AuthenticationMethod.ChatGpt) "${ChatGptOAuth.Resource}/responses"
     else "${config.baseUrl.trimEnd('/')}/${config.protocol.path}"
 
+/** Google uses its own key header; OpenAI-compatible APIs use a bearer token. */
+internal fun io.ktor.client.request.HttpRequestBuilder.authorize(config: OpenAIModelConfig) {
+    if (config.requestProtocol == ApiProtocol.Gemini) headers.append("x-goog-api-key", config.apiKey)
+    else headers.append(io.ktor.http.HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+}
+
+/** Google lists models as `models/{id}`, but the Interactions API takes the bare id. */
+fun geminiModelId(model: String): String = model.removePrefix("models/")
+
 fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest): JsonObject = buildJsonObject {
-    put("model", config.model)
+    put("model", if (config.requestProtocol == ApiProtocol.Gemini) geminiModelId(config.model) else config.model)
     put("stream", true)
     when (config.requestProtocol) {
         ApiProtocol.ChatCompletions -> {
@@ -145,5 +159,34 @@ fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest): JsonObj
             config.reasoningEffort?.let { effort -> putJsonObject("reasoning") { put("effort", effort) } }
             if (config.webSearch) putJsonArray("tools") { add(buildJsonObject { put("type", "web_search") }) }
         }
+        ApiProtocol.Gemini -> {
+            // The full history is sent each turn, so nothing needs to be stored by Google.
+            put("store", false)
+            if (request.instructions.isNotBlank()) put("system_instruction", request.instructions)
+            putJsonArray("input") {
+                request.messages.forEach { message -> add(buildJsonObject {
+                    put("type", if (message.role == MessageRole.User) "user_input" else "model_output")
+                    putJsonArray("content") {
+                        if (message.text.isNotBlank() || message.images.isEmpty()) add(buildJsonObject {
+                            put("type", "text")
+                            put("text", message.text)
+                        })
+                        message.images.forEach { image -> add(geminiImage(image)) }
+                    }
+                }) }
+            }
+            config.reasoningEffort?.let { effort -> putJsonObject("generation_config") { put("thinking_level", effort) } }
+            if (config.webSearch) putJsonArray("tools") { add(buildJsonObject { put("type", "google_search") }) }
+        }
     }
+}
+
+private fun geminiImage(image: OpenAIImage): JsonObject = buildJsonObject {
+    put("type", "image")
+    val inline = Regex("^data:([^;,]+);base64,(.*)$", RegexOption.DOT_MATCHES_ALL).find(image.url)
+    if (inline != null) {
+        put("mime_type", inline.groupValues[1])
+        put("data", inline.groupValues[2])
+    } else put("uri", image.url)
+    if (image.detail == "low" || image.detail == "high") put("resolution", image.detail)
 }

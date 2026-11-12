@@ -23,7 +23,7 @@ data class ApiConnection(
     val name: String = "",
     val authentication: AuthenticationMethod = AuthenticationMethod.ApiKey,
     val baseUrl: String = OpenAIModelConfig().baseUrl,
-    val protocol: ApiProtocol = OpenAIModelConfig().protocol,
+    val protocol: ApiProtocol = ApiProtocol.Responses,
     val apiKey: String = "",
     val chatGptAccountId: String? = null,
 ) {

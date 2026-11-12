@@ -21,7 +21,7 @@ class OpenAIModelsTest {
                 assertEquals(JsonObject(emptyMap()), body["web_search_options"])
                 assertFalse(body.containsKey("tools"))
             } else {
-                assertEquals("web_search", body.getValue("tools").jsonArray.single().jsonObject.getValue("type").jsonPrimitive.content)
+                assertEquals(if (protocol == ApiProtocol.Gemini) "google_search" else "web_search", body.getValue("tools").jsonArray.single().jsonObject.getValue("type").jsonPrimitive.content)
                 assertFalse(body.containsKey("web_search_options"))
             }
             val disabled = buildRequestBody(config.copy(webSearch = false), request)

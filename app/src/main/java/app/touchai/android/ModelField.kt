@@ -43,7 +43,7 @@ fun ModelField(connection: ApiConnection?, model: String, onChange: (String) -> 
     LaunchedEffect(manager) {
         try { manager.load() } catch (failure: Exception) { if (failure is CancellationException) throw failure }
     }
-    LaunchedEffect(endpoint?.authentication, endpoint?.baseUrl, endpoint?.apiKey, account?.id, account?.tokens != null, reload) {
+    LaunchedEffect(endpoint?.authentication, endpoint?.baseUrl, endpoint?.apiKey, endpoint?.protocol, account?.id, account?.tokens != null, reload) {
         models = emptyList(); failed = false; loading = false
         message = when {
             endpoint == null -> null
@@ -56,7 +56,7 @@ fun ModelField(connection: ApiConnection?, model: String, onChange: (String) -> 
         loading = true
         try {
             models = if (chatGpt) manager.models(account!!.id).map { AvailableModel(it.slug, it.name) }
-                else app.modelCatalog.models(endpoint.baseUrl, endpoint.apiKey)
+                else app.modelCatalog.models(endpoint.baseUrl, endpoint.apiKey, endpoint.protocol)
             if (models.isEmpty()) { message = "No models are listed for this connection."; failed = true }
             else if (chatGpt && latestModel.isBlank()) latestChange(models.first().id)
         } catch (failure: Exception) {

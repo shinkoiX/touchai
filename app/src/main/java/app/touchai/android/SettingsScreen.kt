@@ -21,6 +21,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.touchai.core.openai.ApiProtocol
 import app.touchai.core.openai.AuthenticationMethod
+import app.touchai.core.openai.GeminiBaseUrl
 import app.touchai.core.openai.OpenAIModelConfig
 import java.net.URI
 import java.util.UUID
@@ -217,7 +218,7 @@ private fun ConnectionEditor(value: ApiConnection, expanded: Boolean, usedBy: Li
                     OutlinedTextField(value.baseUrl, { onChange(value.copy(baseUrl = it)) }, label = { Text("Base URL") },
                         placeholder = { Text("https://api.example.com/v1") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false))
-                    Choices(ApiProtocol.entries, { it == value.protocol }, { it.label }) { onChange(value.copy(protocol = it)) }
+                    Choices(ApiProtocol.entries, { it == value.protocol }, { it.label }) { onChange(value.withProtocol(it)) }
                     OutlinedTextField(value.apiKey, { onChange(value.copy(apiKey = it)) }, label = { Text("API key") }, visualTransformation = PasswordVisualTransformation(),
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false), singleLine = true, modifier = Modifier.fillMaxWidth())
                 }
@@ -229,6 +230,19 @@ private fun ConnectionEditor(value: ApiConnection, expanded: Boolean, usedBy: Li
             }
         }
     }
+}
+
+/** Moves between Google's OpenAI-compatible and native base URLs when switching to or from Gemini. */
+private fun ApiConnection.withProtocol(protocol: ApiProtocol): ApiConnection {
+    val url = baseUrl.trim().trimEnd('/')
+    val openAiDefault = OpenAIModelConfig().baseUrl
+    val baseUrl = when {
+        protocol == ApiProtocol.Gemini && (url == openAiDefault || url.isEmpty()) -> GeminiBaseUrl
+        protocol == ApiProtocol.Gemini && url.endsWith("/openai") && "googleapis.com" in url -> url.removeSuffix("/openai")
+        protocol != ApiProtocol.Gemini && url == GeminiBaseUrl -> "$GeminiBaseUrl/openai"
+        else -> baseUrl
+    }
+    return copy(protocol = protocol, baseUrl = baseUrl)
 }
 
 private fun connectionSummary(connection: ApiConnection): String = when (connection.authentication) {
@@ -269,7 +283,8 @@ private fun AiConfigurationEditor(value: AiConfiguration, connections: List<ApiC
         ConnectionPicker(connection, connections) { selected ->
             // Model IDs rarely carry over between ChatGPT accounts and API providers.
             val sameModels = connection != null && connection.authentication == selected.authentication &&
-                (selected.authentication == AuthenticationMethod.ApiKey || connection.chatGptAccountId == selected.chatGptAccountId)
+                if (selected.authentication == AuthenticationMethod.ApiKey) connection.baseUrl.trimEnd('/') == selected.baseUrl.trimEnd('/')
+                else connection.chatGptAccountId == selected.chatGptAccountId
             onChange(value.copy(connectionId = selected.id, api = if (sameModels) value.api else value.api.copy(model = "")))
         }
         ModelField(connection, value.api.model) { model -> api { it.copy(model = model) } }

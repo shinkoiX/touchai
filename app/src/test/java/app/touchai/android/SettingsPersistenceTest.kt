@@ -127,6 +127,10 @@ class SettingsPersistenceTest {
             assertNull(settingsError(rotated))
             assertNotNull(settingsError(rotated.copy(connections = emptyList())))
             assertNotNull(settingsError(rotated.copy(connections = listOf(shared.copy(baseUrl = "http://insecure.example.com")))))
+            assertEquals(ApiProtocol.Responses, ApiConnection().protocol)
+            val gemini = shared.copy(protocol = ApiProtocol.Gemini, baseUrl = app.touchai.core.openai.GeminiBaseUrl)
+            assertNull(settingsError(rotated.copy(connections = listOf(gemini))))
+            assertNotNull(settingsError(rotated.copy(connections = listOf(gemini.copy(baseUrl = "${gemini.baseUrl}/openai")))))
         } finally { scope.coroutineContext[Job]!!.cancelAndJoin() }
     }
 

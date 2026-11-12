@@ -507,7 +507,10 @@ internal fun apiError(api: OpenAIModelConfig, requireCredentials: Boolean): Stri
     return when {
         uri.scheme != "https" || uri.host.isNullOrBlank() -> "Use an HTTPS API base URL, including its version path."
         uri.userInfo != null || uri.query != null || uri.fragment != null -> "The base URL must not contain credentials, a query, or a fragment."
-        uri.path.endsWith("/responses") || uri.path.endsWith("/chat/completions") -> "Enter the base URL only; the selected API protocol adds the endpoint path."
+        uri.path.trimEnd('/').let { it.endsWith("/responses") || it.endsWith("/chat/completions") || it.endsWith("/interactions") } ->
+            "Enter the base URL only; the selected API protocol adds the endpoint path."
+        api.protocol == ApiProtocol.Gemini && uri.path.trimEnd('/').endsWith("/openai") ->
+            "For the Gemini protocol, use Google's base URL without /openai, such as $GeminiBaseUrl."
         requireCredentials && api.apiKey.isBlank() -> "Enter the API key for this configuration in Settings."
         requireCredentials && api.model.isBlank() -> "Enter a model ID for this configuration in Settings."
         else -> null
