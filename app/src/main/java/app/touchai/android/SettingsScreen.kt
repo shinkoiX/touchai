@@ -21,8 +21,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import app.touchai.core.openai.ApiProtocol
 import app.touchai.core.openai.AuthenticationMethod
-import app.touchai.core.openai.ChatGptOAuth
 import app.touchai.core.openai.OpenAIModelConfig
+import java.net.URI
 import java.util.UUID
 import kotlin.math.roundToInt
 
@@ -31,6 +31,9 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
     onDraftChange: (AppSettings) -> Unit, onTest: (AiConfiguration, String) -> Unit, onLogs: () -> Unit, onClose: () -> Unit) {
     val draft = state.settingsDraft!!
     var expandedPreset by rememberSaveable { mutableStateOf(state.selectedPreset) }
+    var expandedConnection by rememberSaveable { mutableStateOf<String?>(null) }
+    // Settings from the repository are already migrated; this covers drafts built elsewhere.
+    LaunchedEffect(draft.connectionId == null) { if (draft.connectionId == null) onDraftChange(draft.withConnections()) }
     BackHandler(enabled = !state.savingSettings) { onClose() }
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding()) {
         AppTopBar("Settings", navigation = { AppIconButton(R.drawable.ic_back, "Back", onClose, enabled = !state.savingSettings) }) {
@@ -49,11 +52,39 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                 SectionHeader("Quick access")
                 QuickAccessSettings(draft.quickAccess, { onDraftChange(draft.copy(quickAccess = it)) }, runtime)
             }
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionHeader("Connections", Modifier.padding(bottom = 0.dp))
+                Text("Add each API key or ChatGPT account once, then choose it for the default AI or a preset.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                draft.connections.forEach { connection ->
+                    key(connection.id) {
+                        val usedBy = buildList {
+                            if (draft.connectionId == connection.id) add("Default AI")
+                            draft.presets.filter { it.customAi?.connectionId == connection.id }.forEach { add(it.name.ifBlank { "New preset" }) }
+                        }
+                        ConnectionEditor(connection, expanded = expandedConnection == connection.id, usedBy = usedBy,
+                            onExpand = { expandedConnection = if (expandedConnection == connection.id) null else connection.id },
+                            onChange = { value -> onDraftChange(draft.copy(connections = draft.connections.map { if (it.id == connection.id) value else it })) },
+                            onRemove = { onDraftChange(draft.copy(connections = draft.connections.filterNot { it.id == connection.id })) })
+                    }
+                }
+                OutlinedButton(onClick = {
+                    val name = generateSequence(1) { it + 1 }.map { "Connection $it" }.first { candidate -> draft.connections.none { it.name == candidate } }
+                    val connection = ApiConnection(name = name)
+                    onDraftChange(draft.copy(connections = draft.connections + connection))
+                    expandedConnection = connection.id
+                }, modifier = Modifier.fillMaxWidth()) {
+                    AppIcon(R.drawable.ic_add, null, size = 18.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text("Add connection")
+                }
+            }
             Column {
                 SectionHeader("Default AI")
                 SettingsGroup {
-                    AiConfigurationEditor(AiConfiguration(draft.api, draft.instructions), { onDraftChange(draft.copy(api = it.api, instructions = it.instructions)) })
-                    TestButton(state.testingConnection) { onTest(AiConfiguration(draft.api, draft.instructions), "Default AI") }
+                    AiConfigurationEditor(draft.defaultAi, draft.connections,
+                        { onDraftChange(draft.copy(api = it.api, instructions = it.instructions, connectionId = it.connectionId)) })
+                    TestButton(state.testingConnection) { onTest(draft.resolve(draft.defaultAi), "Default AI") }
                 }
             }
             Column {
@@ -80,7 +111,9 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                                 verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
                                     Text(preset.name.ifBlank { "New preset" }, style = MaterialTheme.typography.titleMedium)
-                                    Text(if (preset.customAi == null) "Default AI" else preset.customAi.api.model.ifBlank { "Custom AI" },
+                                    Text(preset.customAi?.let { ai ->
+                                        listOfNotNull(draft.connection(ai.connectionId)?.name, ai.api.model.takeIf(String::isNotBlank)).joinToString(" · ").ifBlank { "Custom AI" }
+                                    } ?: "Default AI",
                                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                                 AppIconButton(R.drawable.ic_arrow_up, "Move ${preset.name} up", {
@@ -101,11 +134,11 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                                     }) { change(preset.copy(attachScreenshot = it)) }
                                 }
                                 SwitchRow("Custom AI", preset.customAi != null, { custom ->
-                                    change(preset.copy(customAi = if (custom) AiConfiguration(draft.api.copy(webSearch = true), draft.instructions) else null))
+                                    change(preset.copy(customAi = if (custom) draft.defaultAi.copy(api = draft.api.copy(webSearch = true)) else null))
                                 })
                                 preset.customAi?.let { configuration ->
-                                    AiConfigurationEditor(configuration, { change(preset.copy(customAi = it)) })
-                                    TestButton(state.testingConnection) { onTest(configuration, preset.name) }
+                                    AiConfigurationEditor(configuration, draft.connections, { change(preset.copy(customAi = it)) })
+                                    TestButton(state.testingConnection) { onTest(draft.resolve(configuration), preset.name) }
                                 }
                                 Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.End) {
                                     AppIconButton(R.drawable.ic_delete, "Remove", {
@@ -159,27 +192,87 @@ private fun <T> Choices(options: List<T>, selected: (T) -> Boolean, label: (T) -
 }
 
 @Composable
-private fun AiConfigurationEditor(value: AiConfiguration, onChange: (AiConfiguration) -> Unit) {
-    fun api(change: (OpenAIModelConfig) -> OpenAIModelConfig) = onChange(value.copy(api = change(value.api)))
-    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Choices(AuthenticationMethod.entries, { it == value.api.authentication }, { it.label }) { method ->
-            if (method != value.api.authentication) api {
-                it.copy(authentication = method, apiKey = "", model = "", chatGptAccountId = null,
-                    baseUrl = ChatGptOAuth.Resource, protocol = ApiProtocol.Responses, backgroundResponses = false)
+private fun ConnectionEditor(value: ApiConnection, expanded: Boolean, usedBy: List<String>, onExpand: () -> Unit,
+    onChange: (ApiConnection) -> Unit, onRemove: () -> Unit) {
+    val rotation by animateFloatAsState(if (expanded) 180f else 0f, label = "chevron")
+    SettingsGroup {
+        Row(Modifier.fillMaxWidth().clickable(onClick = onExpand).heightIn(min = 56.dp).padding(start = 16.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(value.name.ifBlank { "New connection" }, style = MaterialTheme.typography.titleMedium)
+                Text(connectionSummary(value), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            AppIcon(R.drawable.ic_expand, if (expanded) "Collapse" else "Expand", Modifier.rotate(rotation), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (expanded) {
+            Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(value.name, { onChange(value.copy(name = it)) }, label = { Text("Connection name") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                Choices(AuthenticationMethod.entries, { it == value.authentication }, { it.label }) { method ->
+                    if (method != value.authentication) onChange(ApiConnection(value.id, value.name, method))
+                }
+                if (value.authentication == AuthenticationMethod.ChatGpt) {
+                    ChatGptAccountConfiguration(value.chatGptAccountId) { onChange(value.copy(chatGptAccountId = it)) }
+                } else {
+                    OutlinedTextField(value.baseUrl, { onChange(value.copy(baseUrl = it)) }, label = { Text("Base URL") },
+                        placeholder = { Text("https://api.example.com/v1") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false))
+                    Choices(ApiProtocol.entries, { it == value.protocol }, { it.label }) { onChange(value.copy(protocol = it)) }
+                    OutlinedTextField(value.apiKey, { onChange(value.copy(apiKey = it)) }, label = { Text("API key") }, visualTransformation = PasswordVisualTransformation(),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false), singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
+                if (usedBy.isNotEmpty()) Text("Used by ${usedBy.joinToString()}. Choose another connection there to remove it.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.End) {
+                AppIconButton(R.drawable.ic_delete, "Remove connection", onRemove, enabled = usedBy.isEmpty())
             }
         }
-        if (value.api.authentication == AuthenticationMethod.ChatGpt) {
-            ChatGptConfiguration(value.api) { configuration -> onChange(value.copy(api = configuration)) }
-        } else {
-            OutlinedTextField(value.api.baseUrl, { url -> api { it.copy(baseUrl = url) } }, label = { Text("Base URL") },
-                placeholder = { Text("https://api.example.com/v1") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, autoCorrectEnabled = false))
-            Choices(ApiProtocol.entries, { it == value.api.protocol }, { it.label }) { protocol -> api { it.copy(protocol = protocol) } }
-            OutlinedTextField(value.api.apiKey, { key -> api { it.copy(apiKey = key) } }, label = { Text("API key") }, visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, autoCorrectEnabled = false), singleLine = true, modifier = Modifier.fillMaxWidth())
-            OutlinedTextField(value.api.model, { model -> api { it.copy(model = model) } }, label = { Text("Model") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                keyboardOptions = KeyboardOptions(autoCorrectEnabled = false))
+    }
+}
+
+private fun connectionSummary(connection: ApiConnection): String = when (connection.authentication) {
+    AuthenticationMethod.ChatGpt -> if (connection.chatGptAccountId == null) "ChatGPT · Not signed in" else "ChatGPT"
+    AuthenticationMethod.ApiKey -> listOf(runCatching { URI(connection.baseUrl).host }.getOrNull() ?: connection.baseUrl,
+        connection.protocol.label, if (connection.apiKey.isBlank()) "No API key" else "API key").joinToString(" · ")
+}
+
+@Composable
+private fun ConnectionPicker(selected: ApiConnection?, connections: List<ApiConnection>, onSelect: (ApiConnection) -> Unit) {
+    var menu by remember { mutableStateOf(false) }
+    Box {
+        OutlinedButton(onClick = { menu = true }, enabled = connections.isNotEmpty(), modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.weight(1f)) {
+                Text(selected?.name ?: if (connections.isEmpty()) "Add a connection first" else "Select connection", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                selected?.let { Text(connectionSummary(it), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) }
+            }
+            AppIcon(R.drawable.ic_expand, null, size = 18.dp)
         }
+        DropdownMenu(menu, { menu = false }) {
+            connections.forEach { connection -> DropdownMenuItem(
+                text = { Column {
+                    Text(connection.name)
+                    Text(connectionSummary(connection), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } },
+                onClick = { menu = false; onSelect(connection) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun AiConfigurationEditor(value: AiConfiguration, connections: List<ApiConnection>, onChange: (AiConfiguration) -> Unit) {
+    fun api(change: (OpenAIModelConfig) -> OpenAIModelConfig) = onChange(value.copy(api = change(value.api)))
+    val connection = connections.find { it.id == value.connectionId }
+    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Connection", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        ConnectionPicker(connection, connections) { selected ->
+            // Model IDs rarely carry over between ChatGPT accounts and API providers.
+            val sameModels = connection != null && connection.authentication == selected.authentication &&
+                (selected.authentication == AuthenticationMethod.ApiKey || connection.chatGptAccountId == selected.chatGptAccountId)
+            onChange(value.copy(connectionId = selected.id, api = if (sameModels) value.api else value.api.copy(model = "")))
+        }
+        ModelField(connection, value.api.model) { model -> api { it.copy(model = model) } }
         Text("Reasoning effort", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         val efforts = listOf(null, "low", "medium", "high")
         Choices(efforts, { it == value.api.reasoningEffort }, { it?.replaceFirstChar(Char::uppercase) ?: "Default" }) { effort ->
@@ -190,6 +283,6 @@ private fun AiConfigurationEditor(value: AiConfiguration, onChange: (AiConfigura
         OutlinedTextField(value.instructions, { onChange(value.copy(instructions = it)) }, label = { Text("Instructions") }, minLines = 2, modifier = Modifier.fillMaxWidth())
     }
     SwitchRow("Web search", value.api.webSearch, { search -> api { it.copy(webSearch = search) } })
-    if (value.api.authentication == AuthenticationMethod.ApiKey && value.api.protocol == ApiProtocol.Responses) SwitchRow("Recover interrupted responses", value.api.backgroundResponses,
+    if (connection?.supportsBackgroundResponses == true) SwitchRow("Recover interrupted responses", value.api.backgroundResponses,
         { enabled -> api { it.copy(backgroundResponses = enabled) } })
 }

@@ -340,6 +340,7 @@ class OpenAIChatViewModel(
         if (_uiState.value.isStreaming || _uiState.value.savingSettings) return
         val normalized = settings.copy(
             api = settings.api.normalized(),
+            connections = settings.connections.map { it.normalized() },
             presets = settings.presets.map { preset -> preset.copy(name = preset.name.trim(),
                 customAi = preset.customAi?.let { it.copy(api = it.api.normalized()) }) },
             lastPresetId = settings.lastPresetId?.takeIf { id -> settings.presets.any { it.id == id } },
@@ -412,7 +413,7 @@ class OpenAIChatViewModel(
         val snapshot = _uiState.value
         if (snapshot.isStreaming || snapshot.turns.isEmpty() || snapshot.savingSettings) return
         val original = snapshot.turns.last().ai.api
-        val configurations = listOf(snapshot.settings.api) + snapshot.settings.presets.mapNotNull { it.customAi?.api }
+        val configurations = snapshot.settings.credentialSources()
         val api = if (original.authentication == AuthenticationMethod.ChatGpt) original.copy(
             chatGptAccountId = original.chatGptAccountId ?: configurations.firstOrNull {
                 it.authentication == AuthenticationMethod.ChatGpt && it.chatGptAccountId != null
@@ -469,19 +470,30 @@ class OpenAIChatViewModel(
     private fun presetText(settings: AppSettings, id: String?) = settings.presets.find { it.id == id }?.prompt.orEmpty()
 }
 
+private fun ApiConnection.normalized() = copy(name = name.trim(), baseUrl = baseUrl.trim().trimEnd('/'), apiKey = apiKey.trim())
+
 private fun OpenAIModelConfig.normalized() = copy(baseUrl = baseUrl.trim().trimEnd('/'), apiKey = apiKey.trim(), model = model.trim(),
     reasoningEffort = reasoningEffort?.trim()?.takeIf(String::isNotEmpty))
 
 internal fun settingsError(settings: AppSettings): String? {
     if (settings.imageLimit !in 1..10) return "Image limit must be between 1 and 10."
     if (settings.quickAccess.cornerSwipe && settings.quickAccess.cornerGestures.isEmpty()) return "Select at least one corner gesture."
-    apiError(settings.api, requireCredentials = false)?.let { return "Default AI: $it" }
+    settings.connections.forEach { connection ->
+        if (connection.name.isBlank()) return "Each connection needs a name."
+        if (settings.connections.count { it.name == connection.name } > 1) return "Connection names must be different."
+        apiError(OpenAIModelConfig().using(connection), requireCredentials = false)?.let { return "${connection.name}: $it" }
+    }
+    aiError(settings, settings.defaultAi)?.let { return "Default AI: $it" }
     settings.presets.forEach { preset ->
         if (preset.name.isBlank() || preset.prompt.isBlank()) return "Each preset needs a name and prompt."
-        preset.customAi?.let { ai -> apiError(ai.api, requireCredentials = false)?.let { return "${preset.name}: $it" } }
+        preset.customAi?.let { ai -> aiError(settings, ai)?.let { return "${preset.name}: $it" } }
     }
     return null
 }
+
+private fun aiError(settings: AppSettings, ai: AiConfiguration): String? =
+    if (ai.connectionId != null && settings.connection(ai.connectionId) == null) "Select a connection."
+    else apiError(settings.resolve(ai).api, requireCredentials = false)
 
 internal fun apiError(api: OpenAIModelConfig, requireCredentials: Boolean): String? {
     if (api.authentication == AuthenticationMethod.ChatGpt) return when {

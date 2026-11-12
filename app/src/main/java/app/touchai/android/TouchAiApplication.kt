@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import app.touchai.core.openai.ApiModelCatalog
 import app.touchai.core.openai.OpenAIModel
 import app.touchai.core.openai.LoggingChatClient
 import app.touchai.core.openai.ChatGptOAuth
@@ -53,6 +54,7 @@ class TouchAiApplication : Application() {
         }
     }
     private val responseClient by lazy { OpenAIModel(httpClient) }
+    val modelCatalog by lazy { ApiModelCatalog(httpClient) }
     val chatGptAccounts by lazy { ChatGptAccountManager(ChatGptAccountStore(settingsDataStore, ApiKeyCipher()), ChatGptOAuth(httpClient)) }
     private val chatClient by lazy { ChatGptChatClient(LoggingChatClient(responseClient, requestLogs), chatGptAccounts) }
     val requests by lazy {

@@ -26,6 +26,10 @@ class DataStoreSettingsRepository(
         val prefs = store.data.first()
         val defaults = AppSettings()
         AppSettings(
+            connectionId = prefs[DefaultConnection]?.takeIf(String::isNotBlank),
+            connections = prefs[Connections]?.let { serialized ->
+                Json.parseToJsonElement(serialized).jsonArray.map { item -> decodeConnection(item.jsonObject) }
+            }.orEmpty(),
             api = OpenAIModelConfig(
                 baseUrl = prefs[BaseUrl] ?: defaults.api.baseUrl,
                 apiKey = cipher.decrypt(prefs[ApiKey] ?: ""),
@@ -52,13 +56,14 @@ class DataStoreSettingsRepository(
             imageQuality = prefs[Quality]?.let(ImageQuality::valueOf) ?: defaults.imageQuality,
             imageLimit = prefs[ImageLimit] ?: defaults.imageLimit,
             quickAccess = readQuickAccess(prefs),
-        )
+        ).withConnections()
     }
 
     override suspend fun save(settings: AppSettings) = withContext(Dispatchers.IO) {
-        val encryptedKey = cipher.encrypt(settings.api.apiKey)
+        val saved = settings.withConnections()
+        val connections = buildJsonArray { saved.connections.forEach { add(encodeConnection(it)) } }.toString()
         val presets = buildJsonArray {
-            settings.presets.forEach { preset -> add(buildJsonObject {
+            saved.presets.forEach { preset -> add(buildJsonObject {
                 put("id", preset.id)
                 put("name", preset.name)
                 put("prompt", preset.prompt)
@@ -67,31 +72,30 @@ class DataStoreSettingsRepository(
             }) }
         }.toString()
         store.edit { prefs ->
-            prefs[BaseUrl] = settings.api.baseUrl
-            prefs[ApiKey] = encryptedKey
-            prefs[Model] = settings.api.model
-            prefs[Protocol] = settings.api.protocol.name
-            prefs[Effort] = settings.api.reasoningEffort ?: ""
-            prefs[WebSearch] = settings.api.webSearch
-            prefs[BackgroundResponses] = settings.api.backgroundResponses
-            prefs[Authentication] = settings.api.authentication.name
-            prefs[ChatGptAccountId] = settings.api.chatGptAccountId.orEmpty()
-            prefs[Instructions] = settings.instructions
+            // Endpoints and credentials now live only in connections.
+            listOf(BaseUrl, ApiKey, Protocol, Authentication, ChatGptAccountId).forEach { prefs.remove(it) }
+            prefs[Connections] = connections
+            prefs[DefaultConnection] = saved.connectionId.orEmpty()
+            prefs[Model] = saved.api.model
+            prefs[Effort] = saved.api.reasoningEffort ?: ""
+            prefs[WebSearch] = saved.api.webSearch
+            prefs[BackgroundResponses] = saved.api.backgroundResponses
+            prefs[Instructions] = saved.instructions
             prefs[Presets] = presets
             val selected = prefs[LastPreset] ?: AppSettings().lastPresetId
-            if (settings.presets.none { it.id == selected }) prefs[LastPreset] = ""
-            prefs[Quality] = settings.imageQuality.name
-            prefs[ImageLimit] = settings.imageLimit
-            prefs[FloatingButton] = settings.quickAccess.floatingButton
-            prefs[CornerSwipe] = settings.quickAccess.cornerSwipe
-            prefs[GestureCornerPosition] = settings.quickAccess.gestureCorner.name
-            prefs[CornerGestures] = settings.quickAccess.cornerGestures.map { it.name }.toSet()
-            prefs[CornerOpacity] = settings.quickAccess.cornerOpacityPercent
-            prefs[CornerAreaSize] = settings.quickAccess.cornerAreaSizeDp
-            prefs[Notification] = settings.quickAccess.notification
-            prefs[NotificationCaptureDelay] = settings.quickAccess.notificationCaptureDelayMillis
-            prefs[ButtonSize] = settings.quickAccess.buttonSizeDp
-            prefs[AttachScreenshotAutomatically] = settings.quickAccess.attachScreenshotAutomatically
+            if (saved.presets.none { it.id == selected }) prefs[LastPreset] = ""
+            prefs[Quality] = saved.imageQuality.name
+            prefs[ImageLimit] = saved.imageLimit
+            prefs[FloatingButton] = saved.quickAccess.floatingButton
+            prefs[CornerSwipe] = saved.quickAccess.cornerSwipe
+            prefs[GestureCornerPosition] = saved.quickAccess.gestureCorner.name
+            prefs[CornerGestures] = saved.quickAccess.cornerGestures.map { it.name }.toSet()
+            prefs[CornerOpacity] = saved.quickAccess.cornerOpacityPercent
+            prefs[CornerAreaSize] = saved.quickAccess.cornerAreaSizeDp
+            prefs[Notification] = saved.quickAccess.notification
+            prefs[NotificationCaptureDelay] = saved.quickAccess.notificationCaptureDelayMillis
+            prefs[ButtonSize] = saved.quickAccess.buttonSizeDp
+            prefs[AttachScreenshotAutomatically] = saved.quickAccess.attachScreenshotAutomatically
             // Position is saved independently by dragging the button, not by the settings form.
         }
         Unit
@@ -122,33 +126,55 @@ class DataStoreSettingsRepository(
         cornerAreaSizeDp = prefs[CornerAreaSize] ?: QuickAccessSettings().cornerAreaSizeDp,
     )
 
+    /** Saved after [withConnections], so only model options and the connection id are written. */
     private fun encodeAi(configuration: AiConfiguration) = buildJsonObject {
         val api = configuration.api
-        put("baseUrl", api.baseUrl)
-        put("encryptedApiKey", cipher.encrypt(api.apiKey))
+        put("connectionId", configuration.connectionId)
         put("model", api.model)
-        put("protocol", api.protocol.name)
         api.reasoningEffort?.let { put("effort", it) }
         put("webSearch", api.webSearch)
         put("backgroundResponses", api.backgroundResponses)
-        put("authentication", api.authentication.name)
-        api.chatGptAccountId?.let { put("chatGptAccountId", it) }
         put("instructions", configuration.instructions)
     }
 
-    private fun decodeAi(value: JsonObject) = AiConfiguration(
-        api = OpenAIModelConfig(
-            baseUrl = value.getValue("baseUrl").jsonPrimitive.content,
-            apiKey = cipher.decrypt(value.getValue("encryptedApiKey").jsonPrimitive.content),
-            model = value.getValue("model").jsonPrimitive.content,
-            protocol = ApiProtocol.valueOf(value.getValue("protocol").jsonPrimitive.content),
-            reasoningEffort = value["effort"]?.jsonPrimitive?.content,
-            webSearch = value.getValue("webSearch").jsonPrimitive.boolean,
-            backgroundResponses = value["backgroundResponses"]?.jsonPrimitive?.boolean ?: false,
-            authentication = value["authentication"]?.jsonPrimitive?.content?.let(AuthenticationMethod::valueOf) ?: AuthenticationMethod.ApiKey,
-            chatGptAccountId = value["chatGptAccountId"]?.jsonPrimitive?.content,
-        ),
-        instructions = value.getValue("instructions").jsonPrimitive.content,
+    /** Also reads older presets that carried their own endpoint and encrypted key; load migrates them. */
+    private fun decodeAi(value: JsonObject): AiConfiguration {
+        val legacy = OpenAIModelConfig()
+        return AiConfiguration(
+            api = OpenAIModelConfig(
+                baseUrl = value["baseUrl"]?.jsonPrimitive?.content ?: legacy.baseUrl,
+                apiKey = cipher.decrypt(value["encryptedApiKey"]?.jsonPrimitive?.content ?: ""),
+                model = value.getValue("model").jsonPrimitive.content,
+                protocol = value["protocol"]?.jsonPrimitive?.content?.let(ApiProtocol::valueOf) ?: legacy.protocol,
+                reasoningEffort = value["effort"]?.jsonPrimitive?.content,
+                webSearch = value.getValue("webSearch").jsonPrimitive.boolean,
+                backgroundResponses = value["backgroundResponses"]?.jsonPrimitive?.boolean ?: false,
+                authentication = value["authentication"]?.jsonPrimitive?.content?.let(AuthenticationMethod::valueOf) ?: AuthenticationMethod.ApiKey,
+                chatGptAccountId = value["chatGptAccountId"]?.jsonPrimitive?.content,
+            ),
+            instructions = value.getValue("instructions").jsonPrimitive.content,
+            connectionId = value["connectionId"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank),
+        )
+    }
+
+    private fun encodeConnection(connection: ApiConnection) = buildJsonObject {
+        put("id", connection.id)
+        put("name", connection.name)
+        put("authentication", connection.authentication.name)
+        put("baseUrl", connection.baseUrl)
+        put("protocol", connection.protocol.name)
+        put("encryptedApiKey", cipher.encrypt(connection.apiKey))
+        put("chatGptAccountId", connection.chatGptAccountId)
+    }
+
+    private fun decodeConnection(value: JsonObject) = ApiConnection(
+        id = value.getValue("id").jsonPrimitive.content,
+        name = value.getValue("name").jsonPrimitive.content,
+        authentication = AuthenticationMethod.valueOf(value.getValue("authentication").jsonPrimitive.content),
+        baseUrl = value.getValue("baseUrl").jsonPrimitive.content,
+        protocol = ApiProtocol.valueOf(value.getValue("protocol").jsonPrimitive.content),
+        apiKey = cipher.decrypt(value.getValue("encryptedApiKey").jsonPrimitive.content),
+        chatGptAccountId = value["chatGptAccountId"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank),
     )
 
     private companion object {
@@ -162,6 +188,8 @@ class DataStoreSettingsRepository(
         val Authentication = stringPreferencesKey("authentication")
         val ChatGptAccountId = stringPreferencesKey("chatgpt_account_id")
         val Instructions = stringPreferencesKey("instructions")
+        val Connections = stringPreferencesKey("connections")
+        val DefaultConnection = stringPreferencesKey("default_connection_id")
         val Presets = stringPreferencesKey("presets")
         // Keep the existing selection slot; it now tracks the most recent choice.
         val LastPreset = stringPreferencesKey("default_preset")

@@ -13,15 +13,20 @@ Android 11 or later and is intended for personal use as a sideloaded APK.
 3. Choose a corner gesture, the floating button, the quick-access notification,
    or a combination, then Save. Allow notifications if using notification access.
    The gesture area and floating button appear when you leave TouchAI.
-4. In **Default AI**, choose **API key** or **ChatGPT**. Configure the endpoint and
-   API key, or use **Continue with ChatGPT** and select an available model. Set
-   reasoning effort, general instructions, and web search. Use Test connection
-   to check the configuration.
-5. Edit the presets. Each preset can use the default AI configuration or its own
-   endpoint, API key, protocol, model, reasoning effort, instructions, and search
-   setting. Use the up/down arrows beside each preset to reorder them, then Save.
-   This order is also used by the chat's preset chips. Your last preset choice is
-   remembered automatically.
+4. In **Connections**, add each API key or ChatGPT account once. An **API key**
+   connection holds the base URL, API protocol, and key; a **ChatGPT** connection
+   uses **Continue with ChatGPT**. Keys are encrypted and stored only here.
+5. In **Default AI**, choose a connection, then set the model, reasoning effort,
+   general instructions, and web search. Use Test connection to check it.
+6. Edit the presets. Each preset can use the default AI configuration or turn on
+   **Custom AI** to pick any saved connection with its own model, reasoning effort,
+   instructions, and search setting—no need to type the key again. Changing a
+   connection's key updates every preset that uses it. Use the up/down arrows
+   beside each preset to reorder them, then Save. This order is also used by the
+   chat's preset chips. Your last preset choice is remembered automatically.
+
+Settings from earlier versions are migrated automatically: each distinct endpoint
+and key typed into the default AI or a preset becomes one connection.
 
 Tap the floating button or the notification's **Ask AI** action. TouchAI captures
 once, then opens the send panel with the full screenshot attached by default.
@@ -168,9 +173,10 @@ and [Android foreground-service limits](https://developer.android.com/develop/ba
 
 ### Sign in with ChatGPT
 
-Choose **ChatGPT → Continue with ChatGPT** in the default AI configuration or a
-custom preset. Complete authorization in the in-app browser (Android Custom Tab),
-close the browser tab, choose a model, and Save. An eligible ChatGPT plan and permission to use it are
+Add a connection under **Connections**, choose **ChatGPT → Continue with ChatGPT**,
+and complete authorization in the in-app browser (Android Custom Tab). Close the
+browser tab, select that connection in the default AI or a custom preset, choose a
+model, and Save. An eligible ChatGPT plan and permission to use it are
 required. **Add account** creates another account/workspace registration; the
 account picker preserves separate registrations even when they share an email.
 **Usage** opens ChatGPT's usage settings. **Sign out** stops that account's active
