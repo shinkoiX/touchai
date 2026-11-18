@@ -52,6 +52,9 @@ data class OpenAIRequest(
 )
 
 sealed interface OpenAIStreamEvent {
+    data object ThinkingStarted : OpenAIStreamEvent
+    data class ReasoningDelta(val text: String) : OpenAIStreamEvent
+    data class ReasoningSnapshot(val text: String) : OpenAIStreamEvent
     data class TextDelta(val text: String) : OpenAIStreamEvent
     data class Completed(val response: JsonObject) : OpenAIStreamEvent
     data class SearchStatus(val status: String) : OpenAIStreamEvent
@@ -75,7 +78,12 @@ interface ChatClient {
     fun stream(config: OpenAIModelConfig, request: OpenAIRequest): Flow<OpenAIStreamEvent>
 }
 
-data class OpenAICompletion(val text: String, val response: JsonObject, val images: List<GeneratedImage> = emptyList())
+data class OpenAICompletion(
+    val text: String,
+    val response: JsonObject,
+    val images: List<GeneratedImage> = emptyList(),
+    val reasoning: String = "",
+)
 class OpenAIRequestException(message: String, val httpStatus: Int? = null) : Exception(message)
 class OpenAIStreamException(message: String) : Exception(message)
 class IncompleteResponseException(val reason: String) : Exception("Answer incomplete: $reason")
@@ -83,7 +91,12 @@ class ResponseInterruptedException(message: String, cause: Throwable? = null) : 
 class ResponseCancelledException(val response: JsonObject) : Exception("The provider cancelled this response.")
 class UserRequestedCancellation(val response: JsonObject? = null) : kotlinx.coroutines.CancellationException("Stopped by user")
 
-data class ResponseOutput(val text: String, val images: List<GeneratedImage>, val citations: List<WebCitation>)
+data class ResponseOutput(
+    val text: String,
+    val images: List<GeneratedImage>,
+    val citations: List<WebCitation>,
+    val reasoning: String = "",
+)
 
 fun buildRequestUrl(config: OpenAIModelConfig): String =
     if (config.authentication == AuthenticationMethod.ChatGpt) "${ChatGptOAuth.Resource}/responses"
@@ -98,7 +111,7 @@ internal fun io.ktor.client.request.HttpRequestBuilder.authorize(config: OpenAIM
 /** Google lists models as `models/{id}`, but the Interactions API takes the bare id. */
 fun geminiModelId(model: String): String = model.removePrefix("models/")
 
-fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest): JsonObject = buildJsonObject {
+fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest, includeReasoningSummary: Boolean = true): JsonObject = buildJsonObject {
     put("model", if (config.requestProtocol == ApiProtocol.Gemini) geminiModelId(config.model) else config.model)
     put("stream", true)
     when (config.requestProtocol) {
@@ -156,7 +169,15 @@ fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest): JsonObj
                     }
                 }) }
             }
-            config.reasoningEffort?.let { effort -> putJsonObject("reasoning") { put("effort", effort) } }
+            val requestSummary = includeReasoningSummary &&
+                (if (config.reasoningEffort != null) !config.reasoningEffort.equals("none", ignoreCase = true)
+                 else supportsDefaultReasoningSummary(config.model))
+            if (config.reasoningEffort != null || requestSummary) {
+                putJsonObject("reasoning") {
+                    config.reasoningEffort?.let { put("effort", it) }
+                    if (requestSummary) put("summary", "auto")
+                }
+            }
             if (config.webSearch) putJsonArray("tools") { add(buildJsonObject { put("type", "web_search") }) }
         }
         ApiProtocol.Gemini -> {
@@ -175,10 +196,23 @@ fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest): JsonObj
                     }
                 }) }
             }
-            config.reasoningEffort?.let { effort -> putJsonObject("generation_config") { put("thinking_level", effort) } }
+            val requestSummary = includeReasoningSummary && !config.reasoningEffort.equals("none", ignoreCase = true)
+            if (config.reasoningEffort != null || requestSummary) {
+                putJsonObject("generation_config") {
+                    config.reasoningEffort?.let { put("thinking_level", it) }
+                    if (requestSummary) put("thinking_summaries", "auto")
+                }
+            }
             if (config.webSearch) putJsonArray("tools") { add(buildJsonObject { put("type", "google_search") }) }
         }
     }
+}
+
+internal fun supportsDefaultReasoningSummary(model: String): Boolean {
+    val id = model.trim().lowercase().substringAfterLast('/')
+    return id.startsWith("o1") || id.startsWith("o3") || id.startsWith("o4") ||
+        id.startsWith("gpt-5") || id.startsWith("gpt-6") || id.startsWith("codex") ||
+        "reasoner" in id || "r1" in id || "qwq" in id || "thinking" in id
 }
 
 private fun geminiImage(image: OpenAIImage): JsonObject = buildJsonObject {

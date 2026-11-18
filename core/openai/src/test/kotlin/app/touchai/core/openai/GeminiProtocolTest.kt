@@ -43,6 +43,7 @@ class GeminiProtocolTest {
         assertEquals(false, body.getValue("store").jsonPrimitive.boolean)
         assertEquals("Be brief.", body.getValue("system_instruction").jsonPrimitive.content)
         assertEquals("low", body.getValue("generation_config").jsonObject.getValue("thinking_level").jsonPrimitive.content)
+        assertEquals("auto", body.getValue("generation_config").jsonObject.getValue("thinking_summaries").jsonPrimitive.content)
         assertEquals(buildJsonArray { add(buildJsonObject { put("type", "google_search") }) }, body["tools"])
         val input = body.getValue("input").jsonArray.map { it.jsonObject }
         assertEquals(listOf("user_input", "model_output", "user_input"), input.map { it.getValue("type").jsonPrimitive.content })
@@ -57,15 +58,20 @@ class GeminiProtocolTest {
     @Test fun streamsTextSearchStatusAndCitationsUntilCompletion() = runBlocking {
         server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(
             event("interaction.created", """{"interaction":{"id":"i1","status":"in_progress"},"event_type":"interaction.created"}""") +
-            event("step.start", """{"index":0,"step":{"type":"google_search_call"},"event_type":"step.start"}""") +
+            event("step.start", """{"index":0,"step":{"type":"thought"},"event_type":"step.start"}""") +
+            event("step.delta", """{"index":0,"delta":{"type":"thought_summary","content":{"type":"text","text":"Plan first."}},"event_type":"step.delta"}""") +
             event("step.stop", """{"index":0,"event_type":"step.stop"}""") +
-            event("step.start", """{"index":1,"step":{"type":"model_output"},"event_type":"step.start"}""") +
-            event("step.delta", """{"index":1,"delta":{"type":"text","text":"Hello, "},"event_type":"step.delta"}""") +
-            event("step.delta", """{"index":1,"delta":{"type":"text","text":"world"},"event_type":"step.delta"}""") +
-            event("step.delta", """{"index":1,"delta":{"type":"text_annotation_delta","annotations":[{"type":"url_citation","url":"https://example.com/a","title":"A","start_index":0,"end_index":5}]},"event_type":"step.delta"}""") +
-            event("interaction.completed", """{"interaction":{"id":"i1","status":"completed","usage":{"total_tokens":3}},"event_type":"interaction.completed"}""") +
+            event("step.start", """{"index":1,"step":{"type":"google_search_call"},"event_type":"step.start"}""") +
+            event("step.stop", """{"index":1,"event_type":"step.stop"}""") +
+            event("step.start", """{"index":2,"step":{"type":"model_output"},"event_type":"step.start"}""") +
+            event("step.delta", """{"index":2,"delta":{"type":"text","text":"Hello, "},"event_type":"step.delta"}""") +
+            event("step.delta", """{"index":2,"delta":{"type":"text","text":"world"},"event_type":"step.delta"}""") +
+            event("step.delta", """{"index":2,"delta":{"type":"text_annotation_delta","annotations":[{"type":"url_citation","url":"https://example.com/a","title":"A","start_index":0,"end_index":5}]},"event_type":"step.delta"}""") +
+            event("interaction.completed", """{"interaction":{"id":"i1","status":"completed","steps":[{"type":"thought","summary":[{"type":"text","text":"Plan first."}]},{"type":"model_output","content":[{"type":"text","text":"Hello, world"}]}],"usage":{"total_tokens":3}},"event_type":"interaction.completed"}""") +
             "event: done\ndata: [DONE]\n\n"))
         val events = OpenAIModel(http).stream(config(), OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Hi")))).toList()
+        assertTrue(events.contains(OpenAIStreamEvent.ThinkingStarted))
+        assertEquals("Plan first.", events.filterIsInstance<OpenAIStreamEvent.ReasoningDelta>().joinToString("") { it.text })
         assertEquals("Hello, world", events.filterIsInstance<OpenAIStreamEvent.TextDelta>().joinToString("") { it.text })
         assertTrue(events.contains(OpenAIStreamEvent.SearchStatus("Searching the web…")))
         assertEquals(listOf(WebCitation("https://example.com/a", "A")), events.filterIsInstance<OpenAIStreamEvent.Citation>().map { it.source })

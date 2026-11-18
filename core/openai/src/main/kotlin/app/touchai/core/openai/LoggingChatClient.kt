@@ -50,9 +50,12 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
         })
         var status = "Completed"
         var failure: Exception? = null
+        var firstReasoningMillis: Long? = null
         var firstTextMillis: Long? = null
+        var reasoningCharacters = 0
         var outputCharacters = 0
         var textChunks = 0
+        val reasoningText = StringBuilder()
         val outputText = StringBuilder()
         val images = linkedMapOf<String, GeneratedImage>()
         var responsePayload: JsonElement? = null
@@ -69,6 +72,18 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
                     outputText.append(event.text)
                 }
                 when (event) {
+                    is OpenAIStreamEvent.ThinkingStarted -> {
+                        if (firstReasoningMillis == null) firstReasoningMillis = elapsed()
+                    }
+                    is OpenAIStreamEvent.ReasoningDelta -> {
+                        if (firstReasoningMillis == null && event.text.isNotEmpty()) firstReasoningMillis = elapsed()
+                        reasoningCharacters += event.text.length
+                        reasoningText.append(event.text)
+                    }
+                    is OpenAIStreamEvent.ReasoningSnapshot -> {
+                        reasoningText.clear(); reasoningText.append(event.text); reasoningCharacters = event.text.length
+                        if (firstReasoningMillis == null && event.text.isNotEmpty()) firstReasoningMillis = elapsed()
+                    }
                     is OpenAIStreamEvent.TextSnapshot -> {
                         outputText.clear(); outputText.append(event.text); outputCharacters = event.text.length
                         if (firstTextMillis == null && event.text.isNotEmpty()) firstTextMillis = elapsed()
@@ -86,6 +101,9 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
             if (error is UserRequestedCancellation) error.response?.let { response ->
                 responsePayload = response
                 val output = readResponseOutput(response)
+                if (output.reasoning.isNotEmpty()) {
+                    reasoningText.clear(); reasoningText.append(output.reasoning); reasoningCharacters = output.reasoning.length
+                }
                 if (output.text.isNotEmpty() || response["status"]?.jsonPrimitive?.content == "completed") {
                     outputText.clear(); outputText.append(output.text); outputCharacters = output.text.length
                 }
@@ -107,11 +125,14 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
                 put("status", status)
                 responseId?.let { put("responseId", it) }
                 put("durationMillis", elapsed())
+                firstReasoningMillis?.let { put("firstReasoningMillis", it) }
                 firstTextMillis?.let { put("firstTextMillis", it) }
+                if (reasoningCharacters > 0) put("reasoningCharacters", reasoningCharacters)
                 put("outputCharacters", outputCharacters)
                 put("textChunks", textChunks)
                 put("outputImageCount", images.size)
                 putJsonObject("output") {
+                    if (reasoningText.isNotEmpty()) put("reasoning", reasoningText.toString())
                     put("text", outputText.toString())
                     putJsonArray("images") { images.values.forEach { generated -> add(buildJsonObject {
                         put("id", generated.id); put("url", generated.image.url)

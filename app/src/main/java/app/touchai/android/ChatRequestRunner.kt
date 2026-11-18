@@ -72,8 +72,11 @@ class ChatRequestRunner(
     private suspend fun run(handle: ActiveChatRequest, purpose: RequestPurpose) = coroutineScope {
         val initial = handle.state.value
         val turn = initial.turns.last()
-        val buffer = StreamingTextBuffer(this) { delta -> update(handle) { it.copy(answer = it.answer + delta) } }
-        handle.flush = buffer::flush
+        val reasoningBuffer = StreamingTextBuffer(this) { delta ->
+            update(handle) { it.copy(reasoning = it.reasoning + delta, isThinking = it.answer.isEmpty() && it.generatedImages.isEmpty()) }
+        }
+        val buffer = StreamingTextBuffer(this) { delta -> update(handle) { it.copy(answer = it.answer + delta, isThinking = false) } }
+        handle.flush = { reasoningBuffer.flush(); buffer.flush() }
         var status = TurnStatus.Completed
         var errorMessage: String? = null
         var lastSave = System.nanoTime()
@@ -92,13 +95,38 @@ class ChatRequestRunner(
             client.stream(turn.ai.api, OpenAIRequest(messages, turn.ai.instructions, purpose, turn.presetName,
                 resumeResponseId = if (purpose == RequestPurpose.Resume) turn.responseId else null)).collect { event ->
                 when (event) {
-                    is OpenAIStreamEvent.TextDelta -> buffer.append(event.text)
-                    is OpenAIStreamEvent.TextSnapshot -> { buffer.clear(); update(handle) { it.copy(answer = event.text) } }
-                    is OpenAIStreamEvent.Completed -> buffer.flush()
+                    is OpenAIStreamEvent.ThinkingStarted -> update(handle) {
+                        if (it.answer.isEmpty() && it.generatedImages.isEmpty()) it.copy(isThinking = true) else it
+                    }
+                    is OpenAIStreamEvent.ReasoningDelta -> {
+                        val immediate = handle.state.value.turns.last().reasoning.isEmpty()
+                        reasoningBuffer.append(event.text)
+                        if (immediate) reasoningBuffer.flush()
+                    }
+                    is OpenAIStreamEvent.ReasoningSnapshot -> {
+                        reasoningBuffer.clear()
+                        update(handle) { it.copy(reasoning = event.text) }
+                    }
+                    is OpenAIStreamEvent.TextDelta -> {
+                        reasoningBuffer.flush()
+                        if (handle.state.value.turns.last().isThinking) update(handle) { it.copy(isThinking = false) }
+                        buffer.append(event.text)
+                    }
+                    is OpenAIStreamEvent.TextSnapshot -> {
+                        reasoningBuffer.flush(); buffer.clear()
+                        update(handle) { it.copy(answer = event.text, isThinking = false) }
+                    }
+                    is OpenAIStreamEvent.Completed -> { reasoningBuffer.flush(); buffer.flush() }
                     is OpenAIStreamEvent.SearchStatus -> update(handle) { it.copy(searchStatus = event.status) }
                     is OpenAIStreamEvent.Citation -> update(handle) { it.copy(citations = (it.citations + event.source).distinct()) }
-                    is OpenAIStreamEvent.ImageGenerated -> update(handle) { it.copy(generatedImages = (it.generatedImages + event.value).distinctBy { image -> image.id }) }
-                    is OpenAIStreamEvent.ImageGenerationStatus -> update(handle) { it.copy(imageGenerationStatus = event.status) }
+                    is OpenAIStreamEvent.ImageGenerated -> {
+                        reasoningBuffer.flush()
+                        update(handle) { it.copy(generatedImages = (it.generatedImages + event.value).distinctBy { image -> image.id }, isThinking = false) }
+                    }
+                    is OpenAIStreamEvent.ImageGenerationStatus -> {
+                        reasoningBuffer.flush()
+                        update(handle) { it.copy(imageGenerationStatus = event.status, isThinking = false) }
+                    }
                     is OpenAIStreamEvent.ResponseCheckpoint -> update(handle) { it.copy(responseId = event.id) }
                     is OpenAIStreamEvent.RecoveryStatus -> update(handle) { it.copy(
                         status = if (it.cancelRequested) TurnStatus.Cancelling else if (event.status != null) TurnStatus.Recovering else TurnStatus.Streaming,
@@ -107,19 +135,19 @@ class ChatRequestRunner(
                 }
                 val now = System.nanoTime()
                 if (event is OpenAIStreamEvent.ResponseCheckpoint || event is OpenAIStreamEvent.ImageGenerated || now - lastSave >= 1_000_000_000L) {
-                    buffer.flush(); save(handle); lastSave = now
+                    reasoningBuffer.flush(); buffer.flush(); save(handle); lastSave = now
                 }
             }
         } catch (error: UserRequestedCancellation) {
-            buffer.flush()
+            reasoningBuffer.flush(); buffer.flush()
             error.response?.let { applyResponse(handle, it) }
             status = if (error.response?.get("status")?.jsonPrimitive?.content == "completed") TurnStatus.Completed else TurnStatus.Stopped
         } catch (error: CancellationException) {
-            buffer.flush()
+            reasoningBuffer.flush(); buffer.flush()
             status = if (handle.state.value.turns.last().responseId != null && turn.ai.api.backgroundResponses) TurnStatus.Recovering else TurnStatus.Interrupted
             errorMessage = "Request interrupted on this device. It was not cancelled on the provider."
         } catch (error: ResponseCancelledException) {
-            buffer.flush(); applyResponse(handle, error.response)
+            reasoningBuffer.flush(); buffer.flush(); applyResponse(handle, error.response)
             status = if (handle.state.value.turns.last().cancelRequested) TurnStatus.Stopped else TurnStatus.Interrupted
             errorMessage = if (status == TurnStatus.Stopped) null else error.message
         } catch (error: ResponseInterruptedException) {
@@ -129,13 +157,13 @@ class ChatRequestRunner(
         } catch (error: Exception) {
             status = TurnStatus.Failed; errorMessage = error.message ?: "Request failed."
         } finally {
-            buffer.flush()
+            reasoningBuffer.flush(); buffer.flush()
             handle.stopJob?.cancel()
             withContext(NonCancellable) {
                 handle.saveMutex.withLock {
                     val saved = handle.state.value
                     val finished = saved.copy(updatedAt = System.currentTimeMillis(), turns = saved.turns.dropLast(1) +
-                        saved.turns.last().copy(status = status, error = errorMessage, imageGenerationStatus = null, recoveryStatus = null))
+                        saved.turns.last().copy(status = status, isThinking = false, error = errorMessage, imageGenerationStatus = null, recoveryStatus = null))
                     try { history.save(finished) }
                     catch (error: Exception) { mutableError.value = "Could not save chat: ${error.message}" }
                     handle.mutableState.value = finished
@@ -190,6 +218,8 @@ class ChatRequestRunner(
         val output = readResponseOutput(response)
         update(handle) { it.copy(
             answer = if (output.text.isNotEmpty() || response["status"]?.jsonPrimitive?.content == "completed") output.text else it.answer,
+            reasoning = if (output.reasoning.isNotEmpty()) output.reasoning else it.reasoning,
+            isThinking = false,
             generatedImages = (it.generatedImages + output.images).distinctBy { image -> image.id },
             citations = (it.citations + output.citations).distinct()) }
     }

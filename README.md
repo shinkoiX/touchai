@@ -118,9 +118,12 @@ pixels as PNG; **Balanced** and **Small** resize to at most 2048 or 1280 pixels 
 the longest edge and encode JPEG. Gallery images are initially decoded at a bounded
 resolution of at most 4096 pixels on the longest edge.
 
-Answers stream as Markdown. Stop keeps already received text; Copy copies the
-answer; Retry reuses the latest request and its original AI configuration without
-adding a duplicate turn. Completed turns, including their image inputs, become
+Answers and reasoning summaries stream as Markdown. While a reasoning model is
+thinking, its thought process expands live and then collapses into an expandable
+**Thought process** section once the final answer begins; thoughts are saved in
+history and excluded from follow-up request context. Stop keeps already received
+text; Copy copies the answer; Retry reuses the latest request and its original AI
+configuration without adding a duplicate turn. Completed turns, including their image inputs, become
 follow-up context. Failed, stopped, and incomplete turns stay visible but are
 excluded from later context. Switching presets changes the AI for the next request
 and replaces the editable message text with that preset’s prompt. Send uses the

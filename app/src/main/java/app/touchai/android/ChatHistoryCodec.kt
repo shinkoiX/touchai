@@ -9,6 +9,7 @@ internal fun encodeChatTurn(turn: ChatTurn, encryptedApiKey: String? = null) = b
         put("url", image.url); put("detail", image.detail)
     }) } }
     put("presetName", turn.presetName); put("answer", turn.answer)
+    if (turn.reasoning.isNotEmpty()) put("reasoning", turn.reasoning)
     put("status", if (encryptedApiKey == null && turn.isRunning) TurnStatus.Interrupted.name else turn.status.name)
     if (encryptedApiKey != null) {
         put("responseId", turn.responseId); put("cancelRequested", turn.cancelRequested)
@@ -47,6 +48,7 @@ internal fun decodeChatTurn(value: JsonObject, apiKey: String): ChatTurn {
             chatGptAccountId = ai["chatGptAccountId"]?.jsonPrimitive?.content,
         ), ai.string("instructions")),
         presetName = value.optionalString("presetName"), answer = value.string("answer"),
+        reasoning = value["reasoning"]?.jsonPrimitive?.contentOrNull.orEmpty(),
         status = status,
         responseId = value["responseId"]?.jsonPrimitive?.contentOrNull,
         cancelRequested = value["cancelRequested"]?.jsonPrimitive?.boolean ?: false,

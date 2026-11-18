@@ -7,6 +7,7 @@ import android.widget.Toast
 import java.io.IOException
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -26,6 +27,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -44,6 +46,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -332,6 +335,8 @@ private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> U
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val activelyThinking = turn.isRunning && turn.answer.isEmpty() && turn.generatedImages.isEmpty() &&
+        (turn.isThinking || turn.reasoning.isNotEmpty())
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             BrandMark(22.dp)
@@ -346,9 +351,16 @@ private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> U
         }
         turn.imageGenerationStatus?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
         turn.recoveryStatus?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
-        if (turn.answer.isEmpty() && turn.generatedImages.isEmpty() && turn.isRunning) CircularProgressIndicator(Modifier.padding(vertical = 4.dp).size(18.dp), strokeWidth = 2.dp)
-        val markdown = remember(turn.answer, turn.citations) { citationMarkdown(turn.answer, turn.citations) }
-        SelectionContainer { StreamingMarkdown(markdown, turn.status == TurnStatus.Streaming, Modifier.fillMaxWidth()) }
+        if (turn.reasoning.isNotEmpty() || activelyThinking) {
+            ReasoningSection(turn.reasoning, activelyThinking, defaultExpanded = turn.answer.isEmpty() && turn.generatedImages.isEmpty())
+        }
+        if (turn.answer.isEmpty() && turn.reasoning.isEmpty() && !activelyThinking && turn.generatedImages.isEmpty() && turn.isRunning) {
+            CircularProgressIndicator(Modifier.padding(vertical = 4.dp).size(18.dp), strokeWidth = 2.dp)
+        }
+        if (turn.answer.isNotEmpty()) {
+            val markdown = remember(turn.answer, turn.citations) { citationMarkdown(turn.answer, turn.citations) }
+            SelectionContainer { StreamingMarkdown(markdown, turn.status == TurnStatus.Streaming, Modifier.fillMaxWidth()) }
+        }
         turn.generatedImages.forEach { output -> key(output.id) { SentImage(output.image, "Generated image") } }
         val sources = turn.citations.distinctBy { it.url }
         if (sources.isNotEmpty()) Column {
@@ -365,11 +377,72 @@ private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> U
         }
         if (turn.status == TurnStatus.Stopped) Text("Stopped", style = MaterialTheme.typography.labelMedium, color = muted)
         turn.error?.let { MessageBanner(it, error = true) }
-        if (turn.answer.isNotEmpty() || canRetry) Row(Modifier.offset(x = (-12).dp)) {
-            if (turn.answer.isNotEmpty()) IconButton(onClick = {
-                context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("AI response", turn.answer))
+        val copyText = turn.answer.ifEmpty { turn.reasoning }
+        if (copyText.isNotEmpty() || canRetry) Row(Modifier.offset(x = (-12).dp)) {
+            if (copyText.isNotEmpty()) IconButton(onClick = {
+                context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("AI response", copyText))
             }) { AppIcon(R.drawable.ic_copy, "Copy", size = 18.dp, tint = muted) }
             if (canRetry) IconButton(onClick = onRetry) { AppIcon(R.drawable.ic_refresh, "Retry", size = 18.dp, tint = muted) }
+        }
+    }
+}
+
+@Composable
+private fun ReasoningSection(reasoning: String, activelyThinking: Boolean, defaultExpanded: Boolean) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    if (reasoning.isEmpty()) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(vertical = 2.dp)) {
+            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
+            Text("Thinking…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        }
+        return
+    }
+    var userExpanded by remember { mutableStateOf<Boolean?>(null) }
+    val expanded = userExpanded ?: defaultExpanded
+    val rotation by animateFloatAsState(if (expanded) 180f else 0f, label = "thoughtsChevron")
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = MaterialTheme.shapes.medium,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
+    ) {
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .clickable(onClickLabel = if (expanded) "Collapse thoughts" else "Expand thoughts") { userExpanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (activelyThinking) {
+                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
+                }
+                Text(
+                    text = if (activelyThinking) "Thinking…" else "Thought process",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = if (activelyThinking) MaterialTheme.colorScheme.primary else muted,
+                    modifier = Modifier.weight(1f),
+                )
+                AppIcon(R.drawable.ic_expand, if (expanded) "Collapse thoughts" else "Expand thoughts",
+                    Modifier.rotate(rotation), size = 18.dp, tint = muted)
+            }
+            if (expanded) {
+                val trimmed = remember(reasoning) { reasoning.trim() }
+                if (trimmed.isNotEmpty()) {
+                    SelectionContainer {
+                        StreamingMarkdown(
+                            text = trimmed,
+                            isStreaming = activelyThinking,
+                            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
+                            textColor = muted,
+                            fontSize = 13.sp,
+                            lineHeight = 20.sp,
+                        )
+                    }
+                }
+            }
         }
     }
 }

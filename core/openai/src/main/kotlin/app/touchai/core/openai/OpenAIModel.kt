@@ -43,16 +43,40 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
     }
 
     private fun createStream(config: OpenAIModelConfig, request: OpenAIRequest, onCheckpoint: (String) -> Unit): Flow<OpenAIStreamEvent> = flow {
+        val bodyWithSummary = buildRequestBody(config, request, includeReasoningSummary = true)
+        val bodyWithoutSummary = buildRequestBody(config, request, includeReasoningSummary = false)
+        if (bodyWithSummary != bodyWithoutSummary) {
+            var fallback = false
+            streamWithBody(config, bodyWithSummary, allowSummaryFallback = true, onSummaryRejected = { fallback = true }, onCheckpoint = onCheckpoint)
+            if (fallback) {
+                streamWithBody(config, bodyWithoutSummary, allowSummaryFallback = false, onSummaryRejected = {}, onCheckpoint = onCheckpoint)
+            }
+        } else {
+            streamWithBody(config, bodyWithSummary, allowSummaryFallback = false, onSummaryRejected = {}, onCheckpoint = onCheckpoint)
+        }
+    }
+
+    private suspend fun FlowCollector<OpenAIStreamEvent>.streamWithBody(
+        config: OpenAIModelConfig,
+        requestBody: JsonObject,
+        allowSummaryFallback: Boolean,
+        onSummaryRejected: () -> Unit,
+        onCheckpoint: (String) -> Unit,
+    ) {
         var responseId: String? = null
         httpClient.preparePost(buildRequestUrl(config)) {
             authorize(config)
             accept(ContentType.Text.EventStream)
             contentType(ContentType.Application.Json)
             timeout { requestTimeoutMillis = config.timeoutMillis }
-            setBody(buildRequestBody(config, request).toString())
+            setBody(requestBody.toString())
         }.execute { response ->
             if (!response.status.isSuccess()) {
                 val body = response.bodyAsText()
+                if (allowSummaryFallback && response.status == HttpStatusCode.BadRequest && isReasoningSummaryRejected(config, body)) {
+                    onSummaryRejected()
+                    return@execute
+                }
                 emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(body)))
                 val message = errorMessage(body) ?: response.status.description.takeIf(String::isNotBlank)
                 throw OpenAIRequestException(listOfNotNull("HTTP ${response.status.value}", message).joinToString(": "), response.status.value)
@@ -67,6 +91,8 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
             val channel = response.bodyAsChannel()
             val bytes = ByteArray(8192)
             var completed = false
+            var thinkingEmitted = false
+            val receivedReasoning = StringBuilder()
             val receivedText = StringBuilder()
             val imageIds = mutableSetOf<String>()
             streamLoop@ while (!completed) {
@@ -90,6 +116,22 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                         }
                     }
                     val decoded = decodeStreamPayload(config.requestProtocol, payload, event.name)
+                    if (decoded.thinkingStarted && !thinkingEmitted) {
+                        thinkingEmitted = true
+                        emit(OpenAIStreamEvent.ThinkingStarted)
+                    }
+                    if (decoded.newReasoningSection && receivedReasoning.isNotEmpty() && !receivedReasoning.endsWith("\n")) {
+                        receivedReasoning.append("\n\n")
+                        emit(OpenAIStreamEvent.ReasoningDelta("\n\n"))
+                    }
+                    decoded.reasoningDeltas.forEach { receivedReasoning.append(it); emit(OpenAIStreamEvent.ReasoningDelta(it)) }
+                    decoded.finalReasoning?.let { finalReasoning ->
+                        if (finalReasoning.startsWith(receivedReasoning.toString()) && finalReasoning.length > receivedReasoning.length) {
+                            val remaining = finalReasoning.substring(receivedReasoning.length)
+                            receivedReasoning.append(remaining)
+                            emit(OpenAIStreamEvent.ReasoningDelta(remaining))
+                        }
+                    }
                     decoded.deltas.forEach { receivedText.append(it); emit(OpenAIStreamEvent.TextDelta(it)) }
                     decoded.finalText?.let { finalText ->
                         if (finalText.startsWith(receivedText.toString()) && finalText.length > receivedText.length) {
@@ -159,6 +201,7 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                 }
                 "completed", "cancelled", "failed", "incomplete" -> {
                     val output = readResponseOutput(response)
+                    if (output.reasoning.isNotEmpty()) emit(OpenAIStreamEvent.ReasoningSnapshot(output.reasoning))
                     emit(OpenAIStreamEvent.TextSnapshot(output.text))
                     output.images.forEach { emit(OpenAIStreamEvent.ImageGenerated(it)) }
                     output.citations.forEach { emit(OpenAIStreamEvent.Citation(it)) }
@@ -177,32 +220,40 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
 
     suspend fun complete(config: OpenAIModelConfig, request: OpenAIRequest): OpenAICompletion {
         val text = StringBuilder()
+        val reasoning = StringBuilder()
         var response: JsonObject? = null
         val images = mutableListOf<GeneratedImage>()
         stream(config, request).collect { event ->
             when (event) {
+                is OpenAIStreamEvent.ReasoningDelta -> reasoning.append(event.text)
+                is OpenAIStreamEvent.ReasoningSnapshot -> { reasoning.clear(); reasoning.append(event.text) }
                 is OpenAIStreamEvent.TextDelta -> text.append(event.text)
                 is OpenAIStreamEvent.TextSnapshot -> { text.clear(); text.append(event.text) }
                 is OpenAIStreamEvent.Completed -> response = event.response
                 is OpenAIStreamEvent.ImageGenerated -> images += event.value
+                is OpenAIStreamEvent.ThinkingStarted,
                 is OpenAIStreamEvent.SearchStatus, is OpenAIStreamEvent.Citation,
                 is OpenAIStreamEvent.ImageGenerationStatus, is OpenAIStreamEvent.ResponsePayload -> Unit
                 is OpenAIStreamEvent.ResponseCheckpoint, is OpenAIStreamEvent.RecoveryStatus -> Unit
             }
         }
-        return OpenAICompletion(text.toString(), response!!, images.distinctBy { it.id })
+        return OpenAICompletion(text.toString(), response!!, images.distinctBy { it.id }, reasoning.toString())
     }
 }
 
 internal data class SseEvent(val name: String?, val data: String)
 internal data class DecodedEvent(
     val deltas: List<String> = emptyList(),
+    val reasoningDeltas: List<String> = emptyList(),
+    val thinkingStarted: Boolean = false,
+    val newReasoningSection: Boolean = false,
     val completed: JsonObject? = null,
     val failure: Exception? = null,
     val searchStatus: String? = null,
     val citations: List<WebCitation> = emptyList(),
     val images: List<GeneratedImage> = emptyList(),
     val finalText: String? = null,
+    val finalReasoning: String? = null,
     val imageStatus: String? = null,
     val imageStatusChanged: Boolean = false,
 )
@@ -289,9 +340,18 @@ internal fun errorMessage(body: String): String? = try {
     null
 }
 
+internal fun isReasoningSummaryRejected(config: OpenAIModelConfig, body: String): Boolean {
+    val lower = body.lowercase()
+    if ("reasoning.summary" in lower || "reasoning summary" in lower || "reasoning summaries" in lower || "thinking_summaries" in lower) {
+        return true
+    }
+    return config.requestProtocol == ApiProtocol.Responses && config.reasoningEffort == null && "reasoning" in lower
+}
+
 private fun decodeGeminiEvent(payload: JsonObject, name: String?): DecodedEvent =
     when (payload.string("event_type") ?: name) {
         "step.start" -> when ((payload["step"] as? JsonObject)?.string("type")) {
+            "thought" -> DecodedEvent(thinkingStarted = true, newReasoningSection = true)
             "google_search_call" -> DecodedEvent(searchStatus = "Searching the web…")
             "google_search_result" -> DecodedEvent(searchStatus = "Web search complete")
             else -> DecodedEvent()
@@ -303,6 +363,10 @@ private fun decodeGeminiEvent(payload: JsonObject, name: String?): DecodedEvent 
                 parseCitations(delta?.takeIf { it.string("type") == "url_citation" }?.let { JsonArray(listOf(it)) }, textOffset = null)
             when (delta?.string("type")) {
                 "text" -> DecodedEvent(deltas = listOfNotNull(delta.string("text")), citations = citations)
+                "thought_summary", "thought" -> {
+                    val thought = ((delta["content"] as? JsonObject)?.string("text") ?: delta.string("text"))?.takeIf(String::isNotEmpty)
+                    DecodedEvent(reasoningDeltas = listOfNotNull(thought), thinkingStarted = true, citations = citations)
+                }
                 "google_search_call" -> DecodedEvent(searchStatus = "Searching the web…")
                 "google_search_result" -> DecodedEvent(searchStatus = "Web search complete")
                 else -> DecodedEvent(citations = citations)
@@ -314,7 +378,7 @@ private fun decodeGeminiEvent(payload: JsonObject, name: String?): DecodedEvent 
             val output = interaction?.let(::readInteractionOutput)
             when (status) {
                 "completed" -> DecodedEvent(completed = interaction ?: payload, citations = output?.citations.orEmpty(),
-                    finalText = output?.text?.takeIf(String::isNotEmpty))
+                    finalText = output?.text?.takeIf(String::isNotEmpty), finalReasoning = output?.reasoning?.takeIf(String::isNotEmpty))
                 "failed" -> DecodedEvent(failure = OpenAIRequestException(
                     ((interaction?.get("errors") as? JsonArray)?.firstOrNull() as? JsonObject)?.string("message") ?: "The Gemini request failed."))
                 "incomplete" -> DecodedEvent(failure = incomplete("the model reached its output limit"))
@@ -324,20 +388,27 @@ private fun decodeGeminiEvent(payload: JsonObject, name: String?): DecodedEvent 
             }
         }
         null -> throw OpenAIStreamException("Expected Gemini events. Check the API protocol.")
-        else -> DecodedEvent() // step.stop, thoughts and other lifecycle events do not change the answer.
+        else -> DecodedEvent()
     }
 
-/** Text and citations from a Gemini interaction's `model_output` steps. */
+/** Text, thoughts, and citations from a Gemini interaction's `steps`. */
 fun readInteractionOutput(interaction: JsonObject): ResponseOutput {
     val text = StringBuilder()
     val citations = mutableListOf<WebCitation>()
-    (interaction["steps"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.filter { it.string("type") == "model_output" }.forEach { step ->
+    val steps = (interaction["steps"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+    val reasoning = steps.filter { it.string("type") == "thought" }.mapNotNull { step ->
+        val parts = (step["summary"] as? JsonArray) ?: (step["content"] as? JsonArray)
+        parts.orEmpty().mapNotNull { element ->
+            (element as? JsonObject)?.takeIf { it.string("type") == "text" || it.string("type") == null }?.string("text")?.takeIf(String::isNotEmpty)
+        }.joinToString("").takeIf(String::isNotEmpty)
+    }.joinToString("\n\n")
+    steps.filter { it.string("type") == "model_output" }.forEach { step ->
         (step["content"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.filter { it.string("type") == "text" }.forEach { part ->
             text.append(part.string("text").orEmpty())
             citations += parseCitations(part["annotations"], textOffset = null)
         }
     }
-    return ResponseOutput(text.toString(), emptyList(), citations)
+    return ResponseOutput(text.toString(), emptyList(), citations, reasoning)
 }
 
 private fun decodeChatEvent(payload: JsonObject): DecodedEvent {
@@ -346,10 +417,15 @@ private fun decodeChatEvent(payload: JsonObject): DecodedEvent {
     if (choices.isEmpty()) return DecodedEvent() // Usage-only event.
     val choice = choices.first().jsonObject
     val delta = choice["delta"] as? JsonObject
+    val reasoning = listOfNotNull((delta?.string("reasoning_content") ?: delta?.string("reasoning"))?.takeIf(String::isNotEmpty))
     val text = listOfNotNull(delta?.string("content"), delta?.string("refusal"))
+    val hasReasoningField = delta?.get("reasoning_content")?.takeUnless { it == JsonNull } != null ||
+        delta?.get("reasoning")?.takeUnless { it == JsonNull } != null
     val finish = choice.string("finish_reason")
     return DecodedEvent(
         deltas = text,
+        reasoningDeltas = reasoning,
+        thinkingStarted = reasoning.isNotEmpty() || (hasReasoningField && text.isEmpty()),
         completed = if (finish == "stop") payload else null,
         failure = if (finish != null && finish != "stop") incomplete(finish) else null,
         citations = parseCitations(delta?.get("annotations")),
@@ -373,13 +449,23 @@ private fun incomplete(reason: String) = IncompleteResponseException(
 
 private fun decodeResponseEvent(payload: JsonObject, name: String?): DecodedEvent =
     when (payload.string("type") ?: name) {
+        "response.output_item.added" ->
+            if ((payload["item"] as? JsonObject)?.string("type") == "reasoning") DecodedEvent(thinkingStarted = true) else DecodedEvent()
+        "response.reasoning_summary_part.added" ->
+            DecodedEvent(thinkingStarted = true, newReasoningSection = true)
+        "response.content_part.added" ->
+            if ((payload["part"] as? JsonObject)?.string("type") == "reasoning_text") DecodedEvent(thinkingStarted = true, newReasoningSection = true)
+            else DecodedEvent()
+        "response.reasoning_summary_text.delta", "response.reasoning_text.delta" ->
+            DecodedEvent(reasoningDeltas = listOfNotNull(payload.string("delta")?.takeIf(String::isNotEmpty)), thinkingStarted = true)
         "response.output_text.delta", "response.refusal.delta" ->
             DecodedEvent(deltas = listOfNotNull(payload.string("delta")))
         "response.completed" -> {
             val response = payload["response"] as? JsonObject
                 ?: throw OpenAIStreamException("The completion event did not include response data.")
             val output = readResponseOutput(response)
-            DecodedEvent(completed = response, citations = output.citations, images = output.images, finalText = output.text)
+            DecodedEvent(completed = response, citations = output.citations, images = output.images,
+                finalText = output.text, finalReasoning = output.reasoning.takeIf(String::isNotEmpty))
         }
         "response.output_item.done" -> DecodedEvent(images = listOfNotNull((payload["item"] as? JsonObject)?.let(::generatedImage)))
         "response.image_generation_call.in_progress", "response.image_generation_call.generating" ->
@@ -405,7 +491,8 @@ private fun decodeResponseEvent(payload: JsonObject, name: String?): DecodedEven
         "response.cancelled" -> {
             val response = payload.getValue("response").jsonObject
             val output = readResponseOutput(response)
-            DecodedEvent(failure = ResponseCancelledException(response), images = output.images, citations = output.citations, finalText = output.text)
+            DecodedEvent(failure = ResponseCancelledException(response), images = output.images, citations = output.citations,
+                finalText = output.text, finalReasoning = output.reasoning.takeIf(String::isNotEmpty))
         }
         null -> throw OpenAIStreamException("Expected Responses events. Check the API protocol.")
         else -> DecodedEvent() // Other lifecycle events do not change the answer.
@@ -416,6 +503,15 @@ fun readResponseOutput(response: JsonObject): ResponseOutput {
     val text = StringBuilder()
     val citations = mutableListOf<WebCitation>()
     val items = (response["output"] as? JsonArray).orEmpty()
+    val reasoning = items.mapNotNull { element ->
+        val item = element as? JsonObject ?: return@mapNotNull null
+        if (item.string("type") != "reasoning") return@mapNotNull null
+        val contentParts = (item["content"] as? JsonArray).orEmpty()
+            .mapNotNull { (it as? JsonObject)?.takeIf { part -> part.string("type") == "reasoning_text" }?.string("text")?.takeIf(String::isNotEmpty) }
+        val summaryParts = (item["summary"] as? JsonArray).orEmpty()
+            .mapNotNull { (it as? JsonObject)?.takeIf { part -> part.string("type") == "summary_text" }?.string("text")?.takeIf(String::isNotEmpty) }
+        (contentParts.ifEmpty { summaryParts }).joinToString("\n\n").takeIf(String::isNotEmpty)
+    }.joinToString("\n\n")
     items.filter { it.jsonObject.string("type") == "message" }.forEach { item ->
         (item.jsonObject["content"] as? JsonArray).orEmpty().forEach { content ->
             val part = content.jsonObject
@@ -424,7 +520,7 @@ fun readResponseOutput(response: JsonObject): ResponseOutput {
             text.append(value); textOffset += value.length
         }
     }
-    return ResponseOutput(text.toString(), items.mapNotNull { generatedImage(it.jsonObject) }, citations)
+    return ResponseOutput(text.toString(), items.mapNotNull { generatedImage(it.jsonObject) }, citations, reasoning)
 }
 
 fun isTransientResponseError(error: Exception): Boolean = error is IOException || error is HttpRequestTimeoutException ||

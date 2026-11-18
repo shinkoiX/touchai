@@ -14,7 +14,7 @@ class ChatHistoryArchiveTest {
     private val image = OpenAIImage("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aGDkAAAAASUVORK5CYII=")
     private val turn = ChatTurn(ChatMessage(MessageRole.User, "Image question", listOf(image)),
         AiConfiguration(OpenAIModelConfig(apiKey = "never-export-this-secret", model = "test-model"), "Be concise"),
-        answer = "Saved answer", status = TurnStatus.Completed, citations = listOf(WebCitation("https://example.com", "Source")))
+        answer = "Saved answer", reasoning = "Saved thought process", status = TurnStatus.Completed, citations = listOf(WebCitation("https://example.com", "Source")))
     private val chat = SavedChat("existing-chat", 1234, "explain", listOf(turn))
 
     @Test fun generatedImagesSurviveExportAndImport() = runTest {

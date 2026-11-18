@@ -59,8 +59,20 @@ class OpenAIModelsTest {
         assertEquals("input_image", imageContent.getValue("type").jsonPrimitive.content)
         assertEquals(image.url, imageContent.getValue("image_url").jsonPrimitive.content)
         assertEquals("high", body.getValue("reasoning").jsonObject.getValue("effort").jsonPrimitive.content)
+        assertEquals("auto", body.getValue("reasoning").jsonObject.getValue("summary").jsonPrimitive.content)
         assertFalse(body.getValue("store").jsonPrimitive.boolean)
         assertFalse(body.containsKey("messages"))
+    }
+
+    @Test fun defaultReasoningSummariesAreEnabledOnReasoningModelsAndGeminiUnlessEffortIsNone() {
+        val oSeries = buildRequestBody(OpenAIModelConfig(model = "o4-mini", protocol = ApiProtocol.Responses), request)
+        assertEquals(buildJsonObject { put("summary", "auto") }, oSeries["reasoning"])
+        val noSummary = buildRequestBody(OpenAIModelConfig(model = "o4-mini", protocol = ApiProtocol.Responses), request, includeReasoningSummary = false)
+        assertFalse(noSummary.containsKey("reasoning"))
+        val effortNone = buildRequestBody(OpenAIModelConfig(model = "gpt-5", protocol = ApiProtocol.Responses, reasoningEffort = "none"), request)
+        assertEquals(buildJsonObject { put("effort", "none") }, effortNone["reasoning"])
+        val geminiDefault = buildRequestBody(OpenAIModelConfig(model = "gemini-2.5-pro", protocol = ApiProtocol.Gemini), request)
+        assertEquals("auto", geminiDefault.getValue("generation_config").jsonObject.getValue("thinking_summaries").jsonPrimitive.content)
     }
 
     @Test fun providerDefaultDoesNotSendAnEffortParameter() {

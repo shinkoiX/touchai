@@ -16,7 +16,7 @@ class ChatHistoryStoreTest {
         ChatMessage(MessageRole.User, "Explain this image", listOf(OpenAIImage("data:image/png;base64," + "A".repeat(3_000_000)))),
         AiConfiguration(OpenAIModelConfig(apiKey = "history-secret", model = "test-model", protocol = ApiProtocol.Responses,
             reasoningEffort = "high", webSearch = false, timeoutMillis = 90_000), "Be concise"),
-        presetName = "Explain", answer = "The answer", status = TurnStatus.Completed,
+        presetName = "Explain", answer = "The answer", reasoning = "First analyze the screenshot.", status = TurnStatus.Completed,
         citations = listOf(WebCitation("https://example.com/source", "Source", 0, 4)),
         generatedImages = listOf(GeneratedImage("generated", OpenAIImage("data:image/png;base64," + "B".repeat(3_000_000)))),
     )

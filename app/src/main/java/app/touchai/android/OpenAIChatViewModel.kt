@@ -29,6 +29,8 @@ data class ChatTurn(
     val ai: AiConfiguration,
     val presetName: String? = null,
     val answer: String = "",
+    val reasoning: String = "",
+    val isThinking: Boolean = false,
     val status: TurnStatus = TurnStatus.Streaming,
     val error: String? = null,
     val searchStatus: String? = null,
@@ -429,8 +431,8 @@ class OpenAIChatViewModel(
             updateLast { it.copy(ai = it.ai.copy(api = api), status = TurnStatus.Recovering, error = null, cancelRequested = false) }
             startRequest(RequestPurpose.Resume)
         } else {
-            updateLast { it.copy(ai = it.ai.copy(api = api), answer = "", status = TurnStatus.Streaming, error = null, searchStatus = null,
-                citations = emptyList(), generatedImages = emptyList(), imageGenerationStatus = null, responseId = null, cancelRequested = false) }
+            updateLast { it.copy(ai = it.ai.copy(api = api), answer = "", reasoning = "", isThinking = false, status = TurnStatus.Streaming, error = null,
+                searchStatus = null, citations = emptyList(), generatedImages = emptyList(), imageGenerationStatus = null, responseId = null, cancelRequested = false) }
             startRequest(RequestPurpose.Retry)
         }
     }

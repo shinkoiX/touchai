@@ -124,4 +124,34 @@ class ChatRequestRunnerTest {
         assertEquals(0, calls)
         assertEquals(TurnStatus.Interrupted, history.chats.getValue("chat").turns.last().status)
     }
+
+    @Test fun reasoningStreamsImmediatelyAndIsExcludedFromFollowUpContext() = runTest {
+        val releaseAnswer = CompletableDeferred<Unit>()
+        val sentRequests = mutableListOf<OpenAIRequest>()
+        val runner = runner(object : ChatClient {
+            override fun stream(config: OpenAIModelConfig, request: OpenAIRequest) = flow {
+                sentRequests += request
+                emit(OpenAIStreamEvent.ThinkingStarted)
+                emit(OpenAIStreamEvent.ReasoningDelta("Chain "))
+                emit(OpenAIStreamEvent.ReasoningDelta("of thought"))
+                releaseAnswer.await()
+                emit(OpenAIStreamEvent.TextDelta("Final answer"))
+                emit(OpenAIStreamEvent.Completed(JsonObject(emptyMap())))
+            }
+        })
+        val handle = runner.start(chat()); runCurrent()
+        assertTrue(handle.state.value.turns.last().isThinking)
+        assertEquals("Chain ", handle.state.value.turns.last().reasoning)
+        advanceTimeBy(100); runCurrent()
+        assertEquals("Chain of thought", handle.state.value.turns.last().reasoning)
+        releaseAnswer.complete(Unit); advanceUntilIdle()
+        val firstTurn = handle.state.value.turns.last()
+        assertFalse(firstTurn.isThinking)
+        assertEquals("Chain of thought", firstTurn.reasoning)
+        assertEquals("Final answer", firstTurn.answer)
+        val followUp = SavedChat("chat", 2, null, listOf(firstTurn, ChatTurn(ChatMessage(MessageRole.User, "Next"), AiConfiguration(api))))
+        runner.start(followUp); advanceUntilIdle()
+        assertEquals(listOf(ChatMessage(MessageRole.User, "Question"), ChatMessage(MessageRole.Assistant, "Final answer"),
+            ChatMessage(MessageRole.User, "Next")), sentRequests.last().messages)
+    }
 }

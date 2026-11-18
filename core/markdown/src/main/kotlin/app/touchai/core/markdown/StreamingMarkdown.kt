@@ -8,12 +8,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
 import com.mikepenz.markdown.compose.Markdown
 import com.mikepenz.markdown.m3.markdownColor
@@ -25,30 +27,34 @@ fun StreamingMarkdown(
     text: String,
     isStreaming: Boolean,
     modifier: Modifier = Modifier,
+    textColor: Color = MaterialTheme.colorScheme.onSurface,
+    fontSize: TextUnit = 14.sp,
+    lineHeight: TextUnit = 28.sp,
 ) {
     val chunks = remember(text) { splitStableMarkdownChunks(text) }
     val bodyStyle = MaterialTheme.typography.bodyMedium.copy(
-        color = MaterialTheme.colorScheme.onSurface,
-        fontSize = 14.sp,
-        lineHeight = 28.sp,
+        color = textColor,
+        fontSize = fontSize,
+        lineHeight = lineHeight,
     )
     val colors = markdownColor(
-        text = MaterialTheme.colorScheme.onSurface,
+        text = textColor,
         codeBackground = MaterialTheme.colorScheme.surfaceVariant,
         inlineCodeBackground = MaterialTheme.colorScheme.surfaceVariant,
         dividerColor = MaterialTheme.colorScheme.outline,
         tableBackground = MaterialTheme.colorScheme.surfaceVariant,
     )
+    val codeSize = (fontSize.value - 2f).coerceAtLeast(11f).sp
     val typography = markdownTypography(
-        h1 = bodyStyle.copy(fontSize = 18.sp, fontWeight = FontWeight.SemiBold),
-        h2 = bodyStyle.copy(fontSize = 16.sp, fontWeight = FontWeight.SemiBold),
+        h1 = bodyStyle.copy(fontSize = (fontSize.value + 4f).sp, fontWeight = FontWeight.SemiBold),
+        h2 = bodyStyle.copy(fontSize = (fontSize.value + 2f).sp, fontWeight = FontWeight.SemiBold),
         h3 = bodyStyle.copy(fontWeight = FontWeight.SemiBold),
         h4 = bodyStyle.copy(fontWeight = FontWeight.SemiBold),
         h5 = bodyStyle.copy(fontWeight = FontWeight.SemiBold),
         h6 = bodyStyle.copy(fontWeight = FontWeight.SemiBold),
         text = bodyStyle,
-        code = bodyStyle.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
-        inlineCode = bodyStyle.copy(fontFamily = FontFamily.Monospace, fontSize = 12.sp),
+        code = bodyStyle.copy(fontFamily = FontFamily.Monospace, fontSize = codeSize),
+        inlineCode = bodyStyle.copy(fontFamily = FontFamily.Monospace, fontSize = codeSize),
         quote = bodyStyle.copy(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontStyle = FontStyle.Italic,

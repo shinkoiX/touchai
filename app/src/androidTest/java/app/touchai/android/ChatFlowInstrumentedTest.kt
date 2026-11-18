@@ -410,4 +410,24 @@ class ChatFlowInstrumentedTest {
         compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
         compose.onNodeWithText("A complete answer.", substring = true).assertExists()
     }
+
+    @Test fun reasoningStreamsWhileThinkingAndCollapsesIntoExpandableThoughtProcess() {
+        setup()
+        compose.onNode(hasSetTextAction()).performTextReplacement("Solve puzzle")
+        compose.onNodeWithContentDescription("Send").performClick()
+        compose.waitUntil(5_000) { request != null }
+        events.trySend(OpenAIStreamEvent.ThinkingStarted)
+        events.trySend(OpenAIStreamEvent.ReasoningDelta("Checking constraints first."))
+        compose.waitUntil(5_000) { viewModel.uiState.value.turns.last().reasoning.isNotEmpty() }
+        compose.onNodeWithText("Thinking…").assertExists()
+        compose.onNodeWithText("Checking constraints first.", substring = true).assertExists()
+        events.trySend(OpenAIStreamEvent.TextDelta("The answer is 7."))
+        events.trySend(OpenAIStreamEvent.Completed(JsonObject(emptyMap())))
+        events.close()
+        compose.waitUntil(5_000) { !viewModel.uiState.value.isStreaming }
+        compose.onNodeWithText("Thought process").assertExists()
+        compose.onNodeWithText("Checking constraints first.", substring = true).assertDoesNotExist()
+        compose.onNodeWithText("Thought process").performClick()
+        compose.onNodeWithText("Checking constraints first.", substring = true).assertExists()
+    }
 }

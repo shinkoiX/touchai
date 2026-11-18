@@ -316,4 +316,38 @@ class OpenAIModelStreamTest {
             assertEquals(listOf("世界 👋 café"), decodeStreamEvent(ApiProtocol.ChatCompletions, events.single()).deltas)
         }
     }
+
+    @Test fun chatCompletionsStreamsReasoningContentBeforeFinalAnswer() = runBlocking {
+        enqueue(
+            sse("""{"choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":""},"finish_reason":null}]}""") +
+            sse("""{"choices":[{"index":0,"delta":{"reasoning_content":"Step 1. "},"finish_reason":null}]}""") +
+            sse("""{"choices":[{"index":0,"delta":{"reasoning":"Step 2."},"finish_reason":null}]}""") +
+            chat("42", "stop"),
+        )
+        val events = model.stream(config(), request).toList()
+        assertTrue(events.contains(OpenAIStreamEvent.ThinkingStarted))
+        assertEquals("Step 1. Step 2.", events.filterIsInstance<OpenAIStreamEvent.ReasoningDelta>().joinToString("") { it.text })
+        assertEquals("42", events.filterIsInstance<OpenAIStreamEvent.TextDelta>().joinToString("") { it.text })
+    }
+
+    @Test fun responsesStreamsMultiPartReasoningSummariesAndFallsBackWhenUnverified() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(400).setBody(
+            """{"error":{"message":"Your organization must be verified to generate reasoning summaries.","param":"reasoning.summary"}}"""))
+        enqueue(
+            sse("""{"type":"response.output_item.added","item":{"type":"reasoning"}}""") +
+            sse("""{"type":"response.reasoning_summary_part.added","summary_index":0}""") +
+            sse("""{"type":"response.reasoning_summary_text.delta","delta":"First part."}""") +
+            sse("""{"type":"response.reasoning_summary_part.added","summary_index":1}""") +
+            sse("""{"type":"response.reasoning_summary_text.delta","delta":"Second part."}""") +
+            sse("""{"type":"response.output_text.delta","delta":"Answer"}""") +
+            sse("""{"type":"response.completed","response":{"status":"completed","output":[{"type":"reasoning","summary":[{"type":"summary_text","text":"First part."},{"type":"summary_text","text":"Second part."}]},{"type":"message","content":[{"type":"output_text","text":"Answer"}]}]}}"""),
+        )
+        val result = model.complete(config(ApiProtocol.Responses).copy(reasoningEffort = "medium"), request)
+        assertEquals("First part.\n\nSecond part.", result.reasoning)
+        assertEquals("Answer", result.text)
+        val firstBody = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        val secondBody = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        assertEquals("auto", firstBody.getValue("reasoning").jsonObject["summary"]?.jsonPrimitive?.content)
+        assertFalse(secondBody.getValue("reasoning").jsonObject.containsKey("summary"))
+    }
 }
