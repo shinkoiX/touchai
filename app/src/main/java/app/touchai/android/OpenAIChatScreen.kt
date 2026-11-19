@@ -7,6 +7,7 @@ import android.widget.Toast
 import java.io.IOException
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
@@ -27,9 +28,12 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -390,53 +394,72 @@ private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> U
 @Composable
 private fun ReasoningSection(reasoning: String, activelyThinking: Boolean, defaultExpanded: Boolean) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    val accent = if (activelyThinking) MaterialTheme.colorScheme.primary else muted
     if (reasoning.isEmpty()) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
-            modifier = Modifier.padding(vertical = 2.dp)) {
-            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
-            Text("Thinking…", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            modifier = Modifier.padding(vertical = 4.dp),
+        ) {
+            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.8.dp, color = MaterialTheme.colorScheme.primary)
+            Text("Thinking…", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium,
+                color = MaterialTheme.colorScheme.primary)
         }
         return
     }
     var userExpanded by remember { mutableStateOf<Boolean?>(null) }
     val expanded = userExpanded ?: defaultExpanded
     val rotation by animateFloatAsState(if (expanded) 180f else 0f, label = "thoughtsChevron")
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        shape = MaterialTheme.shapes.medium,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)),
-    ) {
-        Column {
-            Row(
-                modifier = Modifier.fillMaxWidth()
-                    .clickable(onClickLabel = if (expanded) "Collapse thoughts" else "Expand thoughts") { userExpanded = !expanded }
-                    .padding(horizontal = 12.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                if (activelyThinking) {
-                    CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
-                }
-                Text(
-                    text = if (activelyThinking) "Thinking…" else "Thought process",
-                    style = MaterialTheme.typography.labelMedium,
-                    fontWeight = FontWeight.Medium,
-                    color = if (activelyThinking) MaterialTheme.colorScheme.primary else muted,
-                    modifier = Modifier.weight(1f),
-                )
-                AppIcon(R.drawable.ic_expand, if (expanded) "Collapse thoughts" else "Expand thoughts",
-                    Modifier.rotate(rotation), size = 18.dp, tint = muted)
+    val railColor = if (activelyThinking) MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
+        else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f)
+    Column(Modifier.fillMaxWidth().animateContentSize()) {
+        Row(
+            modifier = Modifier.offset(x = (-6).dp)
+                .clip(MaterialTheme.shapes.small)
+                .clickable(onClickLabel = if (expanded) "Collapse thoughts" else "Expand thoughts") { userExpanded = !expanded }
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            if (activelyThinking) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 1.8.dp, color = MaterialTheme.colorScheme.primary)
+            } else {
+                AppIcon(R.drawable.ic_spark, null, size = 14.dp, tint = muted.copy(alpha = 0.85f))
             }
-            if (expanded) {
-                val trimmed = remember(reasoning) { reasoning.trim() }
-                if (trimmed.isNotEmpty()) {
+            Text(
+                text = if (activelyThinking) "Thinking…" else "Thought process",
+                style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.Medium,
+                color = accent,
+            )
+            AppIcon(R.drawable.ic_expand, if (expanded) "Collapse thoughts" else "Expand thoughts",
+                Modifier.rotate(rotation), size = 16.dp, tint = accent)
+        }
+        if (expanded) {
+            val trimmed = remember(reasoning) { reasoning.trim() }
+            if (trimmed.isNotEmpty()) {
+                Box(
+                    Modifier.fillMaxWidth()
+                        .padding(start = 6.dp, top = 2.dp, bottom = 4.dp)
+                        .drawBehind {
+                            val stroke = 2.dp.toPx()
+                            val inset = 2.dp.toPx()
+                            drawLine(
+                                color = railColor,
+                                start = Offset(stroke / 2f, inset),
+                                end = Offset(stroke / 2f, (size.height - inset).coerceAtLeast(inset)),
+                                strokeWidth = stroke,
+                                cap = StrokeCap.Round,
+                            )
+                        }
+                        .padding(start = 14.dp),
+                ) {
                     SelectionContainer {
                         StreamingMarkdown(
                             text = trimmed,
                             isStreaming = activelyThinking,
-                            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
-                            textColor = muted,
+                            modifier = Modifier.fillMaxWidth(),
+                            textColor = muted.copy(alpha = 0.9f),
                             fontSize = 13.sp,
                             lineHeight = 20.sp,
                         )
