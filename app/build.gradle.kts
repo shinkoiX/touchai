@@ -11,8 +11,8 @@ android {
         applicationId = "app.touchai.android"
         minSdk = 30
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.3.5"
+        versionCode = 13
+        versionName = "1.3.6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
