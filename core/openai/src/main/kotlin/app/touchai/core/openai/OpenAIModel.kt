@@ -108,8 +108,8 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                         throw error
                     }
                     emit(OpenAIStreamEvent.ResponsePayload(payload))
-                    if (config.requestProtocol == ApiProtocol.Responses && config.recoverResponses && responseId == null) {
-                        (payload["response"] as? JsonObject)?.string("id")?.let {
+                    if (config.recoverResponses && responseId == null) {
+                        checkpointId(config.requestProtocol, payload)?.let {
                             responseId = it
                             onCheckpoint(it)
                             emit(OpenAIStreamEvent.ResponseCheckpoint(it))
@@ -160,7 +160,7 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
 
     suspend fun cancelResponse(config: OpenAIModelConfig, id: String): JsonObject {
         val response = httpClient.post("${buildRequestUrl(config)}/${id.encodeURLPathPart()}/cancel") {
-            header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+            authorize(config)
             contentType(ContentType.Application.Json); accept(ContentType.Application.Json)
             timeout { requestTimeoutMillis = config.timeoutMillis.coerceAtMost(15_000L) }
             setBody("{}")
@@ -177,7 +177,7 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
             currentCoroutineContext().ensureActive()
             val response = try {
                 val result = httpClient.get("${buildRequestUrl(config)}/${id.encodeURLPathPart()}") {
-                    header(HttpHeaders.Authorization, "Bearer ${config.apiKey}")
+                    authorize(config)
                     accept(ContentType.Application.Json)
                     timeout { requestTimeoutMillis = config.timeoutMillis }
                 }
@@ -199,8 +199,8 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                     emit(OpenAIStreamEvent.RecoveryStatus("Waiting for response…"))
                     delay(2_000)
                 }
-                "completed", "cancelled", "failed", "incomplete" -> {
-                    val output = readResponseOutput(response)
+                "completed", "cancelled", "failed", "incomplete", "requires_action" -> {
+                    val output = readResponseOutput(config.requestProtocol, response)
                     if (output.reasoning.isNotEmpty()) emit(OpenAIStreamEvent.ReasoningSnapshot(output.reasoning))
                     emit(OpenAIStreamEvent.TextSnapshot(output.text))
                     output.images.forEach { emit(OpenAIStreamEvent.ImageGenerated(it)) }
@@ -210,7 +210,8 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                         "completed" -> { emit(OpenAIStreamEvent.Completed(response)); return }
                         "cancelled" -> throw ResponseCancelledException(response)
                         "incomplete" -> throw incomplete((response["incomplete_details"] as? JsonObject)?.string("reason") ?: "generation stopped early")
-                        else -> throw OpenAIRequestException((response["error"] as? JsonObject)?.string("message") ?: "The API response failed.")
+                        "requires_action" -> throw incomplete("tool_calls")
+                        else -> throw OpenAIRequestException(responseFailureMessage(config.requestProtocol, response))
                     }
                 }
                 else -> throw OpenAIStreamException("The saved response has an unsupported status.")
@@ -382,7 +383,10 @@ private fun decodeGeminiEvent(payload: JsonObject, name: String?): DecodedEvent 
                 "failed" -> DecodedEvent(failure = OpenAIRequestException(
                     ((interaction?.get("errors") as? JsonArray)?.firstOrNull() as? JsonObject)?.string("message") ?: "The Gemini request failed."))
                 "incomplete" -> DecodedEvent(failure = incomplete("the model reached its output limit"))
-                "cancelled" -> DecodedEvent(failure = OpenAIRequestException("The provider cancelled this response."))
+                "cancelled" -> DecodedEvent(failure = ResponseCancelledException(interaction ?: payload),
+                    citations = output?.citations.orEmpty(),
+                    finalText = output?.text?.takeIf(String::isNotEmpty),
+                    finalReasoning = output?.reasoning?.takeIf(String::isNotEmpty))
                 "requires_action" -> DecodedEvent(failure = incomplete("tool_calls"))
                 else -> DecodedEvent()
             }
@@ -391,24 +395,59 @@ private fun decodeGeminiEvent(payload: JsonObject, name: String?): DecodedEvent 
         else -> DecodedEvent()
     }
 
-/** Text, thoughts, and citations from a Gemini interaction's `steps`. */
+/** Text, thoughts, and citations from a Gemini interaction's `steps` or `outputs`. */
 fun readInteractionOutput(interaction: JsonObject): ResponseOutput {
     val text = StringBuilder()
     val citations = mutableListOf<WebCitation>()
     val steps = (interaction["steps"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
-    val reasoning = steps.filter { it.string("type") == "thought" }.mapNotNull { step ->
-        val parts = (step["summary"] as? JsonArray) ?: (step["content"] as? JsonArray)
-        parts.orEmpty().mapNotNull { element ->
-            (element as? JsonObject)?.takeIf { it.string("type") == "text" || it.string("type") == null }?.string("text")?.takeIf(String::isNotEmpty)
-        }.joinToString("").takeIf(String::isNotEmpty)
-    }.joinToString("\n\n")
+    val stepReasoning = steps.filter { it.string("type") == "thought" }.mapNotNull(::readInteractionThought).joinToString("\n\n")
     steps.filter { it.string("type") == "model_output" }.forEach { step ->
         (step["content"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }.filter { it.string("type") == "text" }.forEach { part ->
             text.append(part.string("text").orEmpty())
             citations += parseCitations(part["annotations"], textOffset = null)
         }
     }
+    val outputs = (interaction["outputs"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+    val reasoning = if (stepReasoning.isNotEmpty()) stepReasoning
+    else outputs.filter { it.string("type") == "thought" }.mapNotNull(::readInteractionThought).joinToString("\n\n")
+    if (text.isEmpty()) {
+        outputs.filter { it.string("type") == "text" }.forEach { part ->
+            text.append(part.string("text").orEmpty())
+            citations += parseCitations(part["annotations"], textOffset = null)
+        }
+    }
     return ResponseOutput(text.toString(), emptyList(), citations, reasoning)
+}
+
+private fun readInteractionThought(item: JsonObject): String? {
+    val parts = (item["summary"] as? JsonArray) ?: (item["content"] as? JsonArray)
+    if (parts != null) {
+        return parts.mapNotNull { element ->
+            (element as? JsonObject)?.takeIf { it.string("type") == "text" || it.string("type") == null }?.string("text")?.takeIf(String::isNotEmpty)
+        }.joinToString("").takeIf(String::isNotEmpty)
+    }
+    return ((item["summary"] as? JsonObject)?.string("text") ?: item.string("text"))?.takeIf(String::isNotEmpty)
+}
+
+fun readResponseOutput(protocol: ApiProtocol, response: JsonObject): ResponseOutput = when (protocol) {
+    ApiProtocol.Gemini -> readInteractionOutput(response)
+    else -> readResponseOutput(response)
+}
+
+private fun checkpointId(protocol: ApiProtocol, payload: JsonObject): String? = when (protocol) {
+    ApiProtocol.Responses -> (payload["response"] as? JsonObject)?.string("id")
+    ApiProtocol.Gemini -> (payload["interaction"] as? JsonObject)?.string("id")
+        ?: payload.takeIf { it.string("event_type")?.startsWith("interaction.") == true }?.string("id")
+    ApiProtocol.ChatCompletions -> null
+}
+
+private fun responseFailureMessage(protocol: ApiProtocol, response: JsonObject): String {
+    val geminiError = ((response["errors"] as? JsonArray)?.firstOrNull() as? JsonObject)?.string("message")
+    val openAiError = (response["error"] as? JsonObject)?.string("message")
+    return when (protocol) {
+        ApiProtocol.Gemini -> geminiError ?: openAiError ?: "The Gemini request failed."
+        else -> openAiError ?: geminiError ?: "The API response failed."
+    }
 }
 
 private fun decodeChatEvent(payload: JsonObject): DecodedEvent {

@@ -55,7 +55,7 @@ class ChatRequestRunner(
                 if (find(entry.id) != null) continue
                 val saved = history.load(entry.id)
                 val turn = saved.turns.last()
-                if (turn.responseId != null && turn.ai.api.backgroundResponses && turn.ai.api.protocol == ApiProtocol.Responses) {
+                if (turn.responseId != null && turn.ai.api.recoverResponses) {
                     start(saved.copy(turns = saved.turns.dropLast(1) + turn.copy(
                         status = if (turn.cancelRequested) TurnStatus.Cancelling else TurnStatus.Recovering,
                         error = null)), RequestPurpose.Resume)
@@ -144,7 +144,7 @@ class ChatRequestRunner(
             status = if (error.response?.get("status")?.jsonPrimitive?.content == "completed") TurnStatus.Completed else TurnStatus.Stopped
         } catch (error: CancellationException) {
             reasoningBuffer.flush(); buffer.flush()
-            status = if (handle.state.value.turns.last().responseId != null && turn.ai.api.backgroundResponses) TurnStatus.Recovering else TurnStatus.Interrupted
+            status = if (handle.state.value.turns.last().responseId != null && turn.ai.api.recoverResponses) TurnStatus.Recovering else TurnStatus.Interrupted
             errorMessage = "Request interrupted on this device. It was not cancelled on the provider."
         } catch (error: ResponseCancelledException) {
             reasoningBuffer.flush(); buffer.flush(); applyResponse(handle, error.response)
@@ -179,7 +179,7 @@ class ChatRequestRunner(
         if (handle.stopJob?.isActive == true) return
         update(handle) { it.copy(cancelRequested = true, status = TurnStatus.Cancelling, recoveryStatus = "Stopping…") }
         val turn = handle.state.value.turns.last()
-        if (turn.ai.api.protocol != ApiProtocol.Responses || !turn.ai.api.backgroundResponses || (!handle.creationStarted && turn.responseId == null)) {
+        if (!turn.ai.api.recoverResponses || (!handle.creationStarted && turn.responseId == null)) {
             handle.job.cancel(UserRequestedCancellation())
             return
         }
@@ -215,7 +215,7 @@ class ChatRequestRunner(
     fun pauseForSystem() { active.value.values.toList().forEach { it.job.cancel(CancellationException("Android paused background work")) } }
 
     private fun applyResponse(handle: ActiveChatRequest, response: JsonObject) {
-        val output = readResponseOutput(response)
+        val output = readResponseOutput(handle.state.value.turns.last().ai.api.requestProtocol, response)
         update(handle) { it.copy(
             answer = if (output.text.isNotEmpty() || response["status"]?.jsonPrimitive?.content == "completed") output.text else it.answer,
             reasoning = if (output.reasoning.isNotEmpty()) output.reasoning else it.reasoning,

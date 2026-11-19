@@ -154,4 +154,47 @@ class ChatRequestRunnerTest {
         assertEquals(listOf(ChatMessage(MessageRole.User, "Question"), ChatMessage(MessageRole.Assistant, "Final answer"),
             ChatMessage(MessageRole.User, "Next")), sentRequests.last().messages)
     }
+
+    @Test fun geminiBackgroundRequestsRestoreAndCancelUsingInteractionOutput() = runTest {
+        val geminiApi = OpenAIModelConfig(apiKey = "test-only", model = "gemini-test", baseUrl = GeminiBaseUrl,
+            protocol = ApiProtocol.Gemini, backgroundResponses = true)
+        val first = runner(object : ChatClient {
+            override fun stream(config: OpenAIModelConfig, request: OpenAIRequest) = flow {
+                emit(OpenAIStreamEvent.ResponseCheckpoint("int_saved"))
+                awaitCancellation()
+            }
+        })
+        first.start(SavedChat("gemini-chat", 1, null, listOf(ChatTurn(ChatMessage(MessageRole.User, "Hi"), AiConfiguration(geminiApi)))))
+        runCurrent()
+        first.pauseForSystem(); advanceUntilIdle()
+        assertEquals(TurnStatus.Recovering, history.chats.getValue("gemini-chat").turns.last().status)
+
+        val requests = mutableListOf<OpenAIRequest>()
+        val second = runner(object : ChatClient {
+            override fun stream(config: OpenAIModelConfig, request: OpenAIRequest) = flow {
+                requests += request
+                emit(OpenAIStreamEvent.TextSnapshot("Recovered Gemini"))
+                emit(OpenAIStreamEvent.Completed(JsonObject(emptyMap())))
+            }
+        })
+        second.restorePending(); advanceUntilIdle()
+        assertEquals("int_saved", requests.single().resumeResponseId)
+        assertEquals("Recovered Gemini", history.chats.getValue("gemini-chat").turns.last().answer)
+        assertEquals(TurnStatus.Completed, history.chats.getValue("gemini-chat").turns.last().status)
+
+        val stopRunner = runner(object : ChatClient {
+            override fun stream(config: OpenAIModelConfig, request: OpenAIRequest) = flow {
+                emit(OpenAIStreamEvent.ResponseCheckpoint("int_cancel"))
+                awaitCancellation()
+            }
+        }, { _, id ->
+            assertEquals("int_cancel", id)
+            Json.parseToJsonElement("""{"id":"int_cancel","status":"cancelled","outputs":[{"type":"text","text":"Stopped Gemini"}]}""").jsonObject
+        })
+        val handle = stopRunner.start(SavedChat("gemini-stop", 1, null, listOf(ChatTurn(ChatMessage(MessageRole.User, "Hi"), AiConfiguration(geminiApi)))))
+        runCurrent()
+        stopRunner.stop("gemini-stop"); advanceUntilIdle()
+        assertEquals(TurnStatus.Stopped, handle.state.value.turns.last().status)
+        assertEquals("Stopped Gemini", handle.state.value.turns.last().answer)
+    }
 }

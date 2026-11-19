@@ -27,7 +27,8 @@ data class ApiConnection(
     val apiKey: String = "",
     val chatGptAccountId: String? = null,
 ) {
-    val supportsBackgroundResponses: Boolean get() = authentication == AuthenticationMethod.ApiKey && protocol == ApiProtocol.Responses
+    val supportsBackgroundResponses: Boolean get() = authentication == AuthenticationMethod.ApiKey &&
+        protocol in listOf(ApiProtocol.Responses, ApiProtocol.Gemini)
 
     fun endpoint(): ApiConnection = if (authentication == AuthenticationMethod.ChatGpt)
         copy(baseUrl = ChatGptOAuth.Resource, protocol = ApiProtocol.Responses, apiKey = "") else copy(chatGptAccountId = null)

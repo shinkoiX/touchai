@@ -426,7 +426,7 @@ class OpenAIChatViewModel(
         }?.apiKey.orEmpty())
         val error = apiError(api, requireCredentials = true)
         if (error != null) { reportError(error); return }
-        val resume = snapshot.turns.last().status == TurnStatus.Interrupted && snapshot.turns.last().responseId != null && api.backgroundResponses
+        val resume = snapshot.turns.last().status == TurnStatus.Interrupted && snapshot.turns.last().responseId != null && api.recoverResponses
         if (resume) {
             updateLast { it.copy(ai = it.ai.copy(api = api), status = TurnStatus.Recovering, error = null, cancelRequested = false) }
             startRequest(RequestPurpose.Resume)

@@ -33,7 +33,7 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
             config.reasoningEffort?.let { put("reasoningEffort", it) }
             put("webSearch", config.webSearch)
             put("timeoutMillis", config.timeoutMillis)
-            put("backgroundResponses", config.protocol == ApiProtocol.Responses && config.backgroundResponses)
+            put("backgroundResponses", config.recoverResponses)
             request.resumeResponseId?.let { put("responseId", it) }
             put("instructions", request.instructions)
             put("messageCount", request.messages.size)
@@ -100,7 +100,7 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
             status = if (error is UserRequestedCancellation) "Cancelled" else "Interrupted"
             if (error is UserRequestedCancellation) error.response?.let { response ->
                 responsePayload = response
-                val output = readResponseOutput(response)
+                val output = readResponseOutput(config.requestProtocol, response)
                 if (output.reasoning.isNotEmpty()) {
                     reasoningText.clear(); reasoningText.append(output.reasoning); reasoningCharacters = output.reasoning.length
                 }

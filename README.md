@@ -154,9 +154,9 @@ cancel an active request. A foreground-service notification keeps the work visib
 tap it to reopen the request, or use **Stop** in the chat or notification to cancel.
 Active chats cannot be deleted before their requests finish or are stopped.
 
-For providers that support Responses background jobs, enable **Recover interrupted
+For providers that support Responses or Gemini Interactions background jobs, enable **Recover interrupted
 responses** in that AI configuration. This sends `background: true` and `store: true`,
-saves the response ID, retrieves the same response after a disconnection, and resumes
+saves the response/interaction ID, retrieves the same response after a disconnection, and resumes
 pending responses when the app reopens or its service restarts. Stop calls the
 provider's cancellation endpoint; if offline, the stop request is saved and retried
 until acknowledged. A stop arriving after completion preserves the completed answer.

@@ -28,7 +28,8 @@ data class OpenAIModelConfig(
     val chatGptAccountId: String? = null,
 ) {
     val requestProtocol: ApiProtocol get() = if (authentication == AuthenticationMethod.ChatGpt) ApiProtocol.Responses else protocol
-    val recoverResponses: Boolean get() = authentication == AuthenticationMethod.ApiKey && protocol == ApiProtocol.Responses && backgroundResponses
+    val recoverResponses: Boolean get() = authentication == AuthenticationMethod.ApiKey &&
+        protocol in listOf(ApiProtocol.Responses, ApiProtocol.Gemini) && backgroundResponses
 }
 
 data class OpenAIImage(val url: String, val detail: String = "auto")
@@ -181,8 +182,9 @@ fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest, includeR
             if (config.webSearch) putJsonArray("tools") { add(buildJsonObject { put("type", "web_search") }) }
         }
         ApiProtocol.Gemini -> {
-            // The full history is sent each turn, so nothing needs to be stored by Google.
-            put("store", false)
+            // Stateless by default; background recovery opts into server-side interaction storage.
+            put("store", config.recoverResponses)
+            if (config.recoverResponses) put("background", true)
             if (request.instructions.isNotBlank()) put("system_instruction", request.instructions)
             putJsonArray("input") {
                 request.messages.forEach { message -> add(buildJsonObject {

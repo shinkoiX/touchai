@@ -129,6 +129,8 @@ class SettingsPersistenceTest {
             assertNotNull(settingsError(rotated.copy(connections = listOf(shared.copy(baseUrl = "http://insecure.example.com")))))
             assertEquals(ApiProtocol.Responses, ApiConnection().protocol)
             val gemini = shared.copy(protocol = ApiProtocol.Gemini, baseUrl = app.touchai.core.openai.GeminiBaseUrl)
+            assertTrue(gemini.supportsBackgroundResponses)
+            assertTrue(OpenAIModelConfig(backgroundResponses = true).using(gemini).backgroundResponses)
             assertNull(settingsError(rotated.copy(connections = listOf(gemini))))
             assertNotNull(settingsError(rotated.copy(connections = listOf(gemini.copy(baseUrl = "${gemini.baseUrl}/openai")))))
         } finally { scope.coroutineContext[Job]!!.cancelAndJoin() }

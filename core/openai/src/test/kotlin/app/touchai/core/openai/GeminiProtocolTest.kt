@@ -52,7 +52,10 @@ class GeminiProtocolTest {
         assertEquals("A cat.", input[1].getValue("content").jsonArray.single().jsonObject.getValue("text").jsonPrimitive.content)
         assertFalse(buildRequestBody(config(webSearch = false), OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Hi")))).containsKey("tools"))
         assertTrue(buildRequestUrl(config()).endsWith("/v1beta/interactions"))
-        assertFalse(OpenAIModelConfig(protocol = ApiProtocol.Gemini, backgroundResponses = true).recoverResponses)
+        assertTrue(OpenAIModelConfig(protocol = ApiProtocol.Gemini, backgroundResponses = true).recoverResponses)
+        val backgroundBody = buildRequestBody(config().copy(backgroundResponses = true), OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Hi"))))
+        assertEquals(true, backgroundBody.getValue("store").jsonPrimitive.boolean)
+        assertEquals(true, backgroundBody.getValue("background").jsonPrimitive.boolean)
     }
 
     @Test fun streamsTextSearchStatusAndCitationsUntilCompletion() = runBlocking {
@@ -111,5 +114,43 @@ class GeminiProtocolTest {
         assertEquals("test-only-key", key)
         assertNull(auth)
         assertEquals("$GeminiBaseUrl/models?pageSize=1000", url)
+    }
+
+    @Test fun interruptedGeminiBackgroundStreamRecoversViaGetAndSupportsCancel() = runBlocking {
+        server.enqueue(MockResponse().setHeader("Content-Type", "text/event-stream").setBody(
+            event("interaction.created", """{"interaction":{"id":"int_saved","status":"in_progress"},"event_type":"interaction.created"}""") +
+                event("step.delta", """{"index":0,"delta":{"type":"text","text":"Partial"},"event_type":"step.delta"}""")))
+        server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(
+            """{"id":"int_saved","status":"in_progress"}"""))
+        server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody(
+            """{"id":"int_saved","status":"completed","outputs":[{"type":"thought","summary":[{"type":"text","text":"Checked."}]},{"type":"text","text":"Full Gemini answer","annotations":[{"type":"url_citation","url":"https://example.com/g","title":"G"}]}]}"""))
+        val model = OpenAIModel(http)
+        val result = model.complete(config().copy(backgroundResponses = true), OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Hi"))))
+        assertEquals("Checked.", result.reasoning)
+        assertEquals("Full Gemini answer", result.text)
+        val create = server.takeRequest()
+        assertEquals("POST", create.method)
+        assertEquals("/v1beta/interactions", create.path)
+        assertEquals("test-only-key", create.getHeader("x-goog-api-key"))
+        assertNull(create.getHeader("Authorization"))
+        val createJson = Json.parseToJsonElement(create.body.readUtf8()).jsonObject
+        assertEquals(true, createJson.getValue("store").jsonPrimitive.boolean)
+        assertEquals(true, createJson.getValue("background").jsonPrimitive.boolean)
+        repeat(2) {
+            val poll = server.takeRequest()
+            assertEquals("GET", poll.method)
+            assertEquals("/v1beta/interactions/int_saved", poll.path)
+            assertEquals("test-only-key", poll.getHeader("x-goog-api-key"))
+            assertNull(poll.getHeader("Authorization"))
+        }
+
+        server.enqueue(MockResponse().setHeader("Content-Type", "application/json").setBody("""{"id":"int_saved","status":"cancelled"}"""))
+        val cancelled = model.cancelResponse(config().copy(backgroundResponses = true), "int_saved")
+        assertEquals("cancelled", cancelled.getValue("status").jsonPrimitive.content)
+        val cancelReq = server.takeRequest()
+        assertEquals("POST", cancelReq.method)
+        assertEquals("/v1beta/interactions/int_saved/cancel", cancelReq.path)
+        assertEquals("test-only-key", cancelReq.getHeader("x-goog-api-key"))
+        assertNull(cancelReq.getHeader("Authorization"))
     }
 }
