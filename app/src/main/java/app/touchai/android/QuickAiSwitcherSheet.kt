@@ -41,6 +41,7 @@ fun QuickAiSwitcherSheet(
     dualEnabled: Boolean = false,
     initialSecondary: AiConfiguration? = null,
     initialSlot: Int = 0,
+    editingSecondaryInSingleMode: Boolean = false,
     onDualModeChange: ((Boolean) -> Unit)? = null,
     onApplySecondary: ((AiConfiguration) -> Unit)? = null,
     onDismiss: () -> Unit,
@@ -51,8 +52,17 @@ fun QuickAiSwitcherSheet(
     var primaryDraft by remember(initial) { mutableStateOf(initial) }
     var secondaryDraft by remember(initialSecondary, initial) { mutableStateOf(initialSecondary ?: initial) }
     var isDual by remember(dualEnabled) { mutableStateOf(allowDual && dualEnabled) }
-    var activeSlot by remember(initialSlot) { mutableIntStateOf(if (allowDual && dualEnabled) initialSlot.coerceIn(0, 1) else 0) }
-    val draft = if (isDual && activeSlot == 1) secondaryDraft else primaryDraft
+    var activeSlot by remember(initialSlot, editingSecondaryInSingleMode) {
+        mutableIntStateOf(
+            when {
+                allowDual && dualEnabled -> initialSlot.coerceIn(0, 1)
+                editingSecondaryInSingleMode -> 1
+                else -> 0
+            },
+        )
+    }
+    val editingSecondary = if (isDual) activeSlot == 1 else editingSecondaryInSingleMode
+    val draft = if (editingSecondary) secondaryDraft else primaryDraft
 
     val selectedConnection = connections.find { it.id == draft.connectionId }
         ?: connections.firstOrNull { conn ->
@@ -80,7 +90,7 @@ fun QuickAiSwitcherSheet(
     var speedExpanded by remember { mutableStateOf(false) }
 
     fun updateDraft(next: AiConfiguration) {
-        if (isDual && activeSlot == 1) {
+        if (editingSecondary) {
             secondaryDraft = next
             if (liveUpdate) onApplySecondary?.invoke(next)
         } else {
@@ -103,7 +113,11 @@ fun QuickAiSwitcherSheet(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Text(
-                    if (isDual) "Dual send" else title,
+                    when {
+                        isDual -> "Dual send"
+                        editingSecondaryInSingleMode -> "Switch model (B)"
+                        else -> title
+                    },
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
@@ -117,7 +131,7 @@ fun QuickAiSwitcherSheet(
                             if (next) {
                                 activeSlot = 1
                             } else {
-                                activeSlot = 0
+                                activeSlot = if (editingSecondaryInSingleMode) 1 else 0
                             }
                             onDualModeChange(next)
                         },

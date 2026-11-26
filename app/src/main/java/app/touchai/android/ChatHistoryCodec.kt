@@ -10,7 +10,6 @@ internal fun encodeChatTurn(turn: ChatTurn, encryptedApiKey: String? = null) = b
     }) } }
     put("presetName", turn.presetName); put("answer", turn.answer)
     if (turn.reasoning.isNotEmpty()) put("reasoning", turn.reasoning)
-    turn.compareGroupId?.let { put("compareGroupId", it) }
     put("status", if (encryptedApiKey == null && turn.isRunning) TurnStatus.Interrupted.name else turn.status.name)
     if (encryptedApiKey != null) {
         put("responseId", turn.responseId); put("cancelRequested", turn.cancelRequested)
@@ -63,7 +62,6 @@ internal fun decodeChatTurn(value: JsonObject, apiKey: String): ChatTurn {
             WebCitation(it.string("url"), it.string("title"), it.getValue("startIndex").jsonPrimitive.intOrNull,
                 it.getValue("endIndex").jsonPrimitive.intOrNull)
         } },
-        compareGroupId = value["compareGroupId"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotEmpty),
     )
 }
 
@@ -71,6 +69,8 @@ internal data class DecodedChatBody(
     val selectedPreset: String?,
     val turns: List<ChatTurn>,
     val tree: ChatTree?,
+    val pairedChatId: String? = null,
+    val pairSlot: Int? = null,
 )
 
 /**
@@ -83,9 +83,13 @@ internal fun encodeChatBody(
     selectedPreset: String?,
     turns: List<ChatTurn>,
     tree: ChatTree?,
+    pairedChatId: String? = null,
+    pairSlot: Int? = null,
     encryptApiKey: (ChatTurn) -> String?,
 ): JsonObject = buildJsonObject {
     put("selectedPreset", selectedPreset)
+    pairedChatId?.let { put("pairedChatId", it) }
+    pairSlot?.let { put("pairSlot", it) }
     val branchedTree = tree?.takeIf { it.hasBranches }
     val latestPath = branchedTree?.latestPath()
     val latestTurns = latestPath?.map { it.turn } ?: turns
@@ -118,6 +122,8 @@ internal fun decodeChatBody(
     decryptApiKey: (JsonObject) -> String,
 ): DecodedChatBody {
     val selectedPreset = body.optionalString("selectedPreset")
+    val pairedChatId = body["pairedChatId"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
+    val pairSlot = body["pairSlot"]?.jsonPrimitive?.intOrNull
     val latestTurns = body.getValue("turns").jsonArray.map { item ->
         val obj = item.jsonObject
         decodeChatTurn(obj, decryptApiKey(obj))
@@ -143,9 +149,9 @@ internal fun decodeChatBody(
         val activeLeafId = treeObj["activeLeafId"]?.jsonPrimitive?.contentOrNull
         val tree = ChatTree(nodes, activeLeafId)
         val activeTurns = tree.activeTurns().takeIf { it.isNotEmpty() } ?: latestTurns
-        return DecodedChatBody(selectedPreset, activeTurns, tree.takeIf { it.hasBranches })
+        return DecodedChatBody(selectedPreset, activeTurns, tree.takeIf { it.hasBranches }, pairedChatId, pairSlot)
     }
-    return DecodedChatBody(selectedPreset, latestTurns, null)
+    return DecodedChatBody(selectedPreset, latestTurns, null, pairedChatId, pairSlot)
 }
 
 

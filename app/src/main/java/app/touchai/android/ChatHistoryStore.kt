@@ -11,13 +11,23 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
-data class ChatHistoryEntry(val id: String, val title: String, val updatedAt: Long, val turnCount: Int, val pending: Boolean = false)
+data class ChatHistoryEntry(
+    val id: String,
+    val title: String,
+    val updatedAt: Long,
+    val turnCount: Int,
+    val pending: Boolean = false,
+    val pairedChatId: String? = null,
+    val pairSlot: Int? = null,
+)
 data class SavedChat(
     val id: String,
     val updatedAt: Long,
     val selectedPreset: String?,
     val turns: List<ChatTurn>,
     val tree: ChatTree? = null,
+    val pairedChatId: String? = null,
+    val pairSlot: Int? = null,
 ) {
     val resolvedTree: ChatTree get() = tree ?: ChatTree.fromLinear(turns)
     val latestTurns: List<ChatTurn> get() = tree?.latestTurns()?.takeIf { it.isNotEmpty() } ?: turns
@@ -30,6 +40,8 @@ data class SavedChat(
                 updatedAt = updatedAt,
                 turnCount = latest.size,
                 pending = tree?.hasRunningNodes == true || turns.any { it.isRunning } || latest.last().isRunning,
+                pairedChatId = pairedChatId,
+                pairSlot = pairSlot,
             )
         }
 
@@ -78,8 +90,10 @@ class ChatHistoryStore(private val directory: File, private val cipher: ApiKeyCi
         val header = buildJsonObject {
             put("id", entry.id); put("title", entry.title); put("updatedAt", entry.updatedAt); put("turnCount", entry.turnCount)
             put("pending", entry.pending)
+            entry.pairedChatId?.let { put("pairedChatId", it) }
+            entry.pairSlot?.let { put("pairSlot", it) }
         }
-        val body = encodeChatBody(chat.selectedPreset, chat.turns, chat.tree) { turn ->
+        val body = encodeChatBody(chat.selectedPreset, chat.turns, chat.tree, chat.pairedChatId, chat.pairSlot) { turn ->
             cipher.encrypt(turn.ai.api.apiKey)
         }
         // Keep the small list entry on its own line so browsing history never loads image data.
@@ -115,7 +129,10 @@ class ChatHistoryStore(private val directory: File, private val cipher: ApiKeyCi
             val decoded = decodeChatBody(body) { turnObj ->
                 cipher.decrypt(turnObj.getValue("ai").jsonObject.string("encryptedApiKey"))
             }
-            SavedChat(id, header.getValue("updatedAt").jsonPrimitive.long, decoded.selectedPreset, decoded.turns, decoded.tree)
+            val pairedChatId = header["pairedChatId"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
+                ?: decoded.pairedChatId
+            val pairSlot = header["pairSlot"]?.jsonPrimitive?.intOrNull ?: decoded.pairSlot
+            SavedChat(id, header.getValue("updatedAt").jsonPrimitive.long, decoded.selectedPreset, decoded.turns, decoded.tree, pairedChatId, pairSlot)
         }
     }
 
@@ -179,6 +196,8 @@ class ChatHistoryStore(private val directory: File, private val cipher: ApiKeyCi
                 header.getValue("updatedAt").jsonPrimitive.long,
                 header.getValue("turnCount").jsonPrimitive.int,
                 header["pending"]?.jsonPrimitive?.boolean ?: false,
+                header["pairedChatId"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank),
+                header["pairSlot"]?.jsonPrimitive?.intOrNull,
             )
             IndexedChatRecord(entry, size, modified, extractSearchTextFromBody(reader))
         }
@@ -194,6 +213,8 @@ class ChatHistoryStore(private val directory: File, private val cipher: ApiKeyCi
                     obj.getValue("updatedAt").jsonPrimitive.long,
                     obj.getValue("turnCount").jsonPrimitive.int,
                     obj["pending"]?.jsonPrimitive?.boolean ?: false,
+                    obj["pairedChatId"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank),
+                    obj["pairSlot"]?.jsonPrimitive?.intOrNull,
                 )
                 index.upsert(IndexedChatRecord(
                     entry,
@@ -238,6 +259,8 @@ class ChatHistoryStore(private val directory: File, private val cipher: ApiKeyCi
         put("updatedAt", record.entry.updatedAt)
         put("turnCount", record.entry.turnCount)
         put("pending", record.entry.pending)
+        record.entry.pairedChatId?.let { put("pairedChatId", it) }
+        record.entry.pairSlot?.let { put("pairSlot", it) }
         put("fileSize", record.fileSize)
         put("fileModified", record.fileModified)
         put("text", record.searchText)

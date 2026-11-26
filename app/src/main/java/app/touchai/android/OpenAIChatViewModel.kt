@@ -42,7 +42,6 @@ data class ChatTurn(
     val responseId: String? = null,
     val cancelRequested: Boolean = false,
     val recoveryStatus: String? = null,
-    val compareGroupId: String? = null,
 ) {
     val isRunning: Boolean get() = status in listOf(TurnStatus.Streaming, TurnStatus.Recovering, TurnStatus.Cancelling)
 }
@@ -70,18 +69,15 @@ private fun List<ImageAttachment>.withScreenshotAttachment(attached: Boolean): L
     }
 }
 
-data class CompareTabInfo(
-    val nodeId: String,
-    val turn: ChatTurn,
-    val selected: Boolean,
-)
+data class BranchInfo(val nodeId: String, val index: Int, val count: Int)
 
-data class BranchInfo(
-    val nodeId: String,
-    val index: Int,
-    val count: Int,
-    val compareTabs: List<CompareTabInfo> = emptyList(),
-)
+data class ChatPaneState(
+    val chatId: String = UUID.randomUUID().toString(),
+    val chatTree: ChatTree = ChatTree(),
+    val turns: List<ChatTurn> = emptyList(),
+) {
+    val isRunning: Boolean get() = chatTree.hasRunningNodes || turns.any { it.isRunning }
+}
 
 data class OpenAIChatUiState(
     val settings: AppSettings = AppSettings(),
@@ -114,19 +110,32 @@ data class OpenAIChatUiState(
     val lastSecondaryAi: AiConfiguration? = null,
     val chatTree: ChatTree = ChatTree(),
     val turns: List<ChatTurn> = emptyList(),
+    val pairedPane: ChatPaneState? = null,
+    val activePairSlot: Int = 0,
     val error: String? = null,
 ) {
-    val isStreaming: Boolean get() = chatTree.hasRunningNodes || turns.any { it.isRunning }
-    val runningCount: Int get() = if (chatTree.isEmpty) turns.count { it.isRunning } else chatTree.runningNodes().size
+    val isPaired: Boolean get() = pairedPane != null
+    val primaryPane: ChatPaneState
+        get() = if (activePairSlot == 0 || pairedPane == null) ChatPaneState(chatId, chatTree, turns) else pairedPane
+    val secondaryPane: ChatPaneState?
+        get() = when {
+            pairedPane == null -> null
+            activePairSlot == 1 -> ChatPaneState(chatId, chatTree, turns)
+            else -> pairedPane
+        }
+    val activePaneIsStreaming: Boolean get() = chatTree.hasRunningNodes || turns.any { it.isRunning }
+    val isStreaming: Boolean get() = activePaneIsStreaming || (pairedPane?.isRunning == true)
+    val runningCount: Int get() = (if (activePaneIsStreaming) 1 else 0) + (if (pairedPane?.isRunning == true) 1 else 0)
     val selectedAi: AiConfiguration get() = temporaryAi?.let(settings::resolve) ?: settings.aiFor(selectedPreset)
     val presetSecondaryAi: AiConfiguration? get() = settings.secondaryAiFor(selectedPreset)
     val isDualMode: Boolean get() = temporaryDualMode ?: (presetSecondaryAi != null)
-    val selectedSecondaryAi: AiConfiguration?
-        get() = if (!isDualMode) null
-        else temporarySecondaryAi?.let(settings::resolve)
+    val resolvedSecondaryAi: AiConfiguration
+        get() = temporarySecondaryAi?.let(settings::resolve)
             ?: presetSecondaryAi
             ?: lastSecondaryAi?.let(settings::resolve)
             ?: selectedAi
+    val selectedSecondaryAi: AiConfiguration? get() = if (isDualMode) resolvedSecondaryAi else null
+    val activeSlotAi: AiConfiguration get() = if (isPaired && activePairSlot == 1) resolvedSecondaryAi else selectedAi
     val hasTemporaryAi: Boolean get() = temporaryAi != null || temporaryDualMode != null || temporarySecondaryAi != null
     val sendingImages: List<ImageAttachment> get() = attachments.filter { it.attached }.sortedBy { it.selectionOrder }
     val preparingImages: Boolean get() = attachments.any { it.preparing }
@@ -137,14 +146,7 @@ data class OpenAIChatUiState(
         val siblings = chatTree.siblingsOf(node.id)
         if (siblings.isEmpty()) return null
         val position = siblings.indexOfFirst { it.id == node.id }.coerceAtLeast(0)
-        val groupId = node.turn.compareGroupId
-        val compareTabs = if (groupId != null) {
-            val groupSiblings = siblings.filter { it.turn.compareGroupId == groupId }
-            if (groupSiblings.size >= 2) {
-                groupSiblings.map { sibling -> CompareTabInfo(sibling.id, sibling.turn, sibling.id == node.id) }
-            } else emptyList()
-        } else emptyList()
-        return BranchInfo(node.id, position, siblings.size, compareTabs)
+        return BranchInfo(node.id, position, siblings.size)
     }
 }
 
@@ -157,7 +159,7 @@ class OpenAIChatViewModel(
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(OpenAIChatUiState(invoking = invoked))
     val uiState = _uiState.asStateFlow()
-    private var requestUpdates: Job? = null
+    private val requestUpdates = mutableMapOf<String, Job>()
     private val imageJobs = mutableMapOf<String, Job>()
     private var captureJob: Job? = null
     private var captureRequested = false
@@ -217,13 +219,13 @@ class OpenAIChatViewModel(
             )
         }
     }
-    fun setTemporarySecondaryAi(configuration: AiConfiguration?) {
+    fun setTemporarySecondaryAi(configuration: AiConfiguration?, enableDual: Boolean = false) {
         update { state ->
             val normalized = configuration?.copy(api = configuration.api.normalized())
             val resolvedCandidate = normalized?.let(state.settings::resolve)
             val presetSecondary = state.presetSecondaryAi
             val tempSecondary = if (resolvedCandidate == presetSecondary) null else normalized
-            val nextDualOverride = if (normalized != null) {
+            val nextDualOverride = if (enableDual && normalized != null) {
                 if (presetSecondary != null) null else true
             } else {
                 state.temporaryDualMode
@@ -232,6 +234,22 @@ class OpenAIChatViewModel(
                 temporaryDualMode = nextDualOverride,
                 temporarySecondaryAi = tempSecondary,
                 lastSecondaryAi = normalized ?: state.lastSecondaryAi,
+                error = null,
+            )
+        }
+    }
+    fun selectPairSlot(slot: Int) {
+        val target = slot.coerceIn(0, 1)
+        update { state ->
+            val other = state.pairedPane ?: return@update state
+            if (state.activePairSlot == target) return@update state
+            val currentPane = ChatPaneState(state.chatId, state.chatTree, state.turns)
+            state.copy(
+                chatId = other.chatId,
+                chatTree = other.chatTree,
+                turns = other.turns,
+                pairedPane = currentPane,
+                activePairSlot = target,
                 error = null,
             )
         }
@@ -332,9 +350,11 @@ class OpenAIChatViewModel(
         }
     }
 
-    private suspend fun loadHistoryEntries(): List<ChatHistoryEntry> =
-        (history.list() + requests.active.value.values.map { it.state.value.entry })
+    private suspend fun loadHistoryEntries(): List<ChatHistoryEntry> {
+        val all = (history.list() + requests.active.value.values.map { it.state.value.entry })
             .associateBy { it.id }.values.sortedByDescending { it.updatedAt }
+        return collapsePairedEntries(all)
+    }
 
     private suspend fun searchHistoryResults(query: String): List<ChatHistorySearchResult> {
         val terms = tokenizeSearchQuery(query)
@@ -349,8 +369,33 @@ class OpenAIChatViewModel(
             compareByDescending<ChatHistorySearchResult> { result ->
                 val titleLower = result.entry.title.lowercase(Locale.ROOT)
                 terms.all { titleLower.contains(it) }
-            }.thenByDescending { it.entry.updatedAt },
+            }.thenByDescending { it.entry.updatedAt }
+                .thenBy { it.entry.pairSlot ?: Int.MAX_VALUE },
         )
+    }
+
+    private fun collapsePairedEntries(entries: List<ChatHistoryEntry>): List<ChatHistoryEntry> {
+        val byId = entries.associateBy { it.id }
+        val seen = HashSet<String>(entries.size)
+        val result = ArrayList<ChatHistoryEntry>(entries.size)
+        for (entry in entries) {
+            if (!seen.add(entry.id)) continue
+            val partner = entry.pairedChatId?.let(byId::get)
+            if (partner != null && seen.add(partner.id)) {
+                val primary = if (partner.pairSlot == 0 && entry.pairSlot != 0) partner else entry
+                val other = if (primary.id == entry.id) partner else entry
+                result.add(
+                    primary.copy(
+                        updatedAt = maxOf(primary.updatedAt, other.updatedAt),
+                        pending = primary.pending || other.pending,
+                        pairedChatId = other.id,
+                    ),
+                )
+            } else {
+                result.add(entry)
+            }
+        }
+        return result.sortedByDescending { it.updatedAt }
     }
 
     private fun List<ChatHistorySearchResult>.toSnippetMap(): Map<String, String> =
@@ -402,16 +447,65 @@ class OpenAIChatViewModel(
                 requests.restorePending()
                 val active = requests.find(id)
                 val chat = active?.state?.value ?: history.load(id)
+                val partnerId = chat.pairedChatId
+                val partnerActive = partnerId?.let(requests::find)
+                val partner = partnerActive?.state?.value ?: partnerId?.let { runCatching { history.load(it) }.getOrNull() }
                 val settings = repository.load()
-                val selected = chat.selectedPreset?.takeIf { id -> settings.presets.any { it.id == id } }
+                val selected = chat.selectedPreset?.takeIf { presetId -> settings.presets.any { it.id == presetId } }
                 val loadedTree = chat.resolvedTree
                 val openingTree = if (active == null) loadedTree.copy(activeLeafId = loadedTree.latestLeaf()?.id) else loadedTree
+                val partnerPane = partner?.let { p ->
+                    val pTree = p.resolvedTree
+                    val openedPartnerTree = if (partnerActive == null) pTree.copy(activeLeafId = pTree.latestLeaf()?.id) else pTree
+                    ChatPaneState(p.id, openedPartnerTree, openedPartnerTree.activeTurns())
+                }
+                val activeSlot = when {
+                    partnerPane == null -> 0
+                    chat.pairSlot in 0..1 -> chat.pairSlot!!
+                    partner?.pairSlot == 0 -> 1
+                    else -> 0
+                }
+                val primaryTurns = if (activeSlot == 0 || partnerPane == null) openingTree.activeTurns() else partnerPane.turns
+                val secondaryTurns = when {
+                    partnerPane == null -> null
+                    activeSlot == 1 -> openingTree.activeTurns()
+                    else -> partnerPane.turns
+                }
+                val restoredPrimaryAi = if (partnerPane != null) {
+                    primaryTurns.lastOrNull()?.ai?.let { restoreAiWithSettings(it, settings) }
+                } else null
+                val restoredSecondaryAi = secondaryTurns?.lastOrNull()?.ai?.let { restoreAiWithSettings(it, settings) }
+                val tempPrimary = restoredPrimaryAi?.takeIf { settings.resolve(it) != settings.aiFor(selected) }
+                val tempSecondary = restoredSecondaryAi?.takeIf { settings.resolve(it) != settings.secondaryAiFor(selected) }
+                val tempDual = if (partnerPane != null) {
+                    if (settings.secondaryAiFor(selected) != null) null else true
+                } else null
                 clearImageJobs()
-                update { it.copy(chatId = chat.id, chatTree = openingTree, turns = openingTree.activeTurns(), settings = settings, ready = true,
-                    selectedPreset = selected, temporaryAi = null, temporaryDualMode = null, temporarySecondaryAi = null, prompt = "", attachments = emptyList(), croppingImageId = null,
-                    historyOpen = false, historyQuery = "", historySnippets = emptyMap()) }
-                requestUpdates?.cancel()
+                clearRequestObservers()
+                update {
+                    it.copy(
+                        chatId = chat.id,
+                        chatTree = openingTree,
+                        turns = openingTree.activeTurns(),
+                        pairedPane = partnerPane,
+                        activePairSlot = activeSlot,
+                        settings = settings,
+                        ready = true,
+                        selectedPreset = selected,
+                        temporaryAi = tempPrimary,
+                        temporaryDualMode = tempDual,
+                        temporarySecondaryAi = tempSecondary,
+                        lastSecondaryAi = restoredSecondaryAi ?: it.lastSecondaryAi,
+                        prompt = "",
+                        attachments = emptyList(),
+                        croppingImageId = null,
+                        historyOpen = false,
+                        historyQuery = "",
+                        historySnippets = emptyMap(),
+                    )
+                }
                 active?.let(::observeRequest)
+                partnerActive?.let(::observeRequest)
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { reportError("Could not open chat: ${error.message}") }
             finally { if (currentCoroutineContext().isActive) update { it.copy(historyLoading = false) } }
@@ -420,16 +514,34 @@ class OpenAIChatViewModel(
 
     fun deleteChat(id: String) {
         if (_uiState.value.historyLoading) return
-        if (requests.find(id) != null) { reportError("Stop the request before deleting this chat."); return }
+        val listedPartnerId = _uiState.value.historyEntries.firstOrNull { it.id == id }?.pairedChatId
+        if (requests.find(id) != null || (listedPartnerId != null && requests.find(listedPartnerId) != null)) {
+            reportError("Stop the request before deleting this chat.")
+            return
+        }
         update { it.copy(historyLoading = true, error = null) }
         historyJob = viewModelScope.launch {
             try {
+                val partnerId = listedPartnerId ?: runCatching { history.load(id).pairedChatId }.getOrNull()
+                if (partnerId != null && requests.find(partnerId) != null) {
+                    reportError("Stop the request before deleting this chat.")
+                    return@launch
+                }
                 history.delete(id)
-                update { it.copy(historyEntries = it.historyEntries.filterNot { entry -> entry.id == id },
-                    historySnippets = it.historySnippets - id,
-                    chatId = if (it.chatId == id) UUID.randomUUID().toString() else it.chatId,
-                    chatTree = if (it.chatId == id) ChatTree() else it.chatTree,
-                    turns = if (it.chatId == id) emptyList() else it.turns) }
+                if (partnerId != null) runCatching { history.delete(partnerId) }
+                val deletedIds = setOfNotNull(id, partnerId)
+                update { state ->
+                    val affectsCurrent = state.chatId in deletedIds || state.pairedPane?.chatId in deletedIds
+                    state.copy(
+                        historyEntries = state.historyEntries.filterNot { entry -> entry.id in deletedIds },
+                        historySnippets = state.historySnippets - deletedIds,
+                        chatId = if (affectsCurrent) UUID.randomUUID().toString() else state.chatId,
+                        chatTree = if (affectsCurrent) ChatTree() else state.chatTree,
+                        turns = if (affectsCurrent) emptyList() else state.turns,
+                        pairedPane = if (affectsCurrent) null else state.pairedPane,
+                        activePairSlot = if (affectsCurrent) 0 else state.activePairSlot,
+                    )
+                }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { reportError("Could not delete chat: ${error.message}") }
             finally { update { it.copy(historyLoading = false) } }
@@ -449,10 +561,10 @@ class OpenAIChatViewModel(
         captureRequested = true
         update { it.copy(invoking = true, settingsOpen = false, logsOpen = false, settingsDraft = null) }
         captureJob = viewModelScope.launch {
-            requestUpdates?.cancel()
+            clearRequestObservers()
             imageJobs.values.toList().forEach { it.cancelAndJoin() }
             imageJobs.clear()
-            update { it.copy(chatId = UUID.randomUUID().toString(), chatTree = ChatTree(), turns = emptyList(), attachments = emptyList(), croppingImageId = null, error = null) }
+            update { it.copy(chatId = UUID.randomUUID().toString(), chatTree = ChatTree(), turns = emptyList(), pairedPane = null, activePairSlot = 0, attachments = emptyList(), croppingImageId = null, error = null) }
             try {
                 val bitmap = capture()
                 presetSaveJob?.join()
@@ -576,6 +688,8 @@ class OpenAIChatViewModel(
                         chatTree = if (conversationChanged) ChatTree() else current.chatTree,
                         turns = if (conversationChanged) emptyList() else current.turns, selectedPreset = selected,
                         chatId = if (conversationChanged) UUID.randomUUID().toString() else current.chatId,
+                        pairedPane = if (conversationChanged) null else current.pairedPane,
+                        activePairSlot = if (conversationChanged) 0 else current.activePairSlot,
                         attachments = if (saved.attachScreenshotFor(selected) != current.settings.attachScreenshotFor(current.selectedPreset))
                             images.withScreenshotAttachment(saved.attachScreenshotFor(selected)) else images,
                         croppingImageId = current.croppingImageId?.takeIf { id -> images.any { it.id == id } },
@@ -638,51 +752,84 @@ class OpenAIChatViewModel(
 
     fun submit() {
         val snapshot = _uiState.value
-        if (!snapshot.ready || snapshot.isStreaming || snapshot.savingSettings || snapshot.croppingImageId != null ||
+        val blockedByStreaming = if (snapshot.isDualMode) snapshot.isStreaming else snapshot.activePaneIsStreaming
+        if (!snapshot.ready || blockedByStreaming || snapshot.savingSettings || snapshot.croppingImageId != null ||
             snapshot.capturingScreenshot || !snapshot.canSendImages) return
-        val ai = snapshot.selectedAi
-        val error = apiError(ai.api, requireCredentials = true)
-        if (error != null) { update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = error) }; return }
-        val secondaryAi = if (snapshot.isDualMode) snapshot.selectedSecondaryAi else null
-        if (secondaryAi != null) {
-            val secondaryError = apiError(secondaryAi.api, requireCredentials = true)
-            if (secondaryError != null) {
-                update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = "2nd AI: $secondaryError") }
-                return
-            }
-        }
         val preset = snapshot.settings.presets.find { it.id == snapshot.selectedPreset }
         val prompt = snapshot.prompt.trim()
         val images = snapshot.sendingImages.map { it.image!! }
         if (prompt.isBlank() && images.isEmpty()) { reportError("Enter a message, choose a preset, or attach an image."); return }
         val user = ChatMessage(MessageRole.User, prompt, images)
-        clearImageJobs()
-        var targetNodeIds: List<String>? = null
-        if (secondaryAi != null) {
-            val compareGroupId = UUID.randomUUID().toString()
-            val firstTurn = ChatTurn(user, ai, preset?.name, compareGroupId = compareGroupId)
-            val secondTurn = ChatTurn(user, secondaryAi, preset?.name, compareGroupId = compareGroupId)
+        if (snapshot.isDualMode) {
+            val primaryAi = snapshot.selectedAi
+            val primaryError = apiError(primaryAi.api, requireCredentials = true)
+            if (primaryError != null) { update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = primaryError) }; return }
+            val secondaryAi = snapshot.resolvedSecondaryAi
+            val secondaryError = apiError(secondaryAi.api, requireCredentials = true)
+            if (secondaryError != null) {
+                update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = "2nd AI: $secondaryError") }
+                return
+            }
+            clearImageJobs()
+            val primaryTurn = ChatTurn(user, primaryAi, preset?.name)
+            val secondaryTurn = ChatTurn(user, secondaryAi, preset?.name)
+            lateinit var nextPrimary: ChatPaneState
+            lateinit var nextSecondary: ChatPaneState
             update { state ->
-                val baseTree = if (state.chatTree.isEmpty && state.turns.isNotEmpty()) ChatTree.fromLinear(state.turns) else state.chatTree
-                val (nextTree, nodeIds) = baseTree.appendDualTurns(firstTurn, secondTurn)
-                targetNodeIds = nodeIds
+                val currentPrimary = state.primaryPane
+                val primaryBase = if (currentPrimary.chatTree.isEmpty && currentPrimary.turns.isNotEmpty()) {
+                    ChatTree.fromLinear(currentPrimary.turns)
+                } else {
+                    currentPrimary.chatTree
+                }
+                val existingSecondary = state.secondaryPane
+                val secondaryId = existingSecondary?.chatId ?: UUID.randomUUID().toString()
+                val secondaryBase = if (existingSecondary != null) {
+                    if (existingSecondary.chatTree.isEmpty && existingSecondary.turns.isNotEmpty()) {
+                        ChatTree.fromLinear(existingSecondary.turns)
+                    } else {
+                        existingSecondary.chatTree
+                    }
+                } else {
+                    primaryBase.cloneWithFreshIds()
+                }
+                val nextPrimaryTree = primaryBase.appendTurn(primaryTurn)
+                val nextSecondaryTree = secondaryBase.appendTurn(secondaryTurn)
+                nextPrimary = ChatPaneState(currentPrimary.chatId, nextPrimaryTree, nextPrimaryTree.activeTurns())
+                nextSecondary = ChatPaneState(secondaryId, nextSecondaryTree, nextSecondaryTree.activeTurns())
+                val activePane = if (state.activePairSlot == 1) nextSecondary else nextPrimary
+                val otherPane = if (state.activePairSlot == 1) nextPrimary else nextSecondary
                 state.copy(
                     prompt = "",
                     attachments = emptyList(),
                     croppingImageId = null,
                     error = null,
                     lastSecondaryAi = state.temporarySecondaryAi ?: state.presetSecondaryAi ?: state.lastSecondaryAi ?: secondaryAi,
-                    chatTree = nextTree,
-                    turns = nextTree.activeTurns(),
+                    chatId = activePane.chatId,
+                    chatTree = activePane.chatTree,
+                    turns = activePane.turns,
+                    pairedPane = otherPane,
                 )
             }
-            rememberModelQuietly(ai.api)
+            rememberModelQuietly(primaryAi.api)
             rememberModelQuietly(secondaryAi.api)
+            startPaneRequest(nextPrimary, pairedChatId = nextSecondary.chatId, pairSlot = 0)
+            startPaneRequest(nextSecondary, pairedChatId = nextPrimary.chatId, pairSlot = 1)
         } else {
+            val ai = snapshot.activeSlotAi
+            val error = apiError(ai.api, requireCredentials = true)
+            if (error != null) { update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = error) }; return }
+            clearImageJobs()
             val newTurn = ChatTurn(user, ai, preset?.name)
+            lateinit var nextPane: ChatPaneState
+            var partnerId: String? = null
+            var pairSlot: Int? = null
             update { state ->
                 val baseTree = if (state.chatTree.isEmpty && state.turns.isNotEmpty()) ChatTree.fromLinear(state.turns) else state.chatTree
                 val nextTree = baseTree.appendTurn(newTurn)
+                nextPane = ChatPaneState(state.chatId, nextTree, nextTree.activeTurns())
+                partnerId = state.pairedPane?.chatId
+                pairSlot = if (state.pairedPane != null) state.activePairSlot else null
                 state.copy(
                     prompt = "",
                     attachments = emptyList(),
@@ -693,33 +840,24 @@ class OpenAIChatViewModel(
                 )
             }
             rememberModelQuietly(ai.api)
-        }
-        startRequest(targetNodeIds = targetNodeIds)
-    }
-
-    fun selectBranchNode(nodeId: String) {
-        val snapshot = _uiState.value
-        if (snapshot.chatTree.node(nodeId) == null) return
-        if (requests.find(snapshot.chatId) != null) {
-            requests.selectNode(snapshot.chatId, nodeId)
-        } else {
-            val nextTree = snapshot.chatTree.selectBranch(nodeId)
-            update { it.copy(chatTree = nextTree, turns = nextTree.activeTurns(), error = null) }
+            startPaneRequest(nextPane, pairedChatId = partnerId, pairSlot = pairSlot)
         }
     }
 
     fun switchBranch(turnIndex: Int, delta: Int) {
         val snapshot = _uiState.value
+        if (snapshot.activePaneIsStreaming) return
         val node = snapshot.chatTree.activePath().getOrNull(turnIndex) ?: return
         val siblings = snapshot.chatTree.siblingsOf(node.id)
         val nextIndex = siblings.indexOfFirst { it.id == node.id } + delta
         if (nextIndex !in siblings.indices) return
-        selectBranchNode(siblings[nextIndex].id)
+        val nextTree = snapshot.chatTree.selectBranch(siblings[nextIndex].id)
+        update { it.copy(chatTree = nextTree, turns = nextTree.activeTurns(), error = null) }
     }
 
     fun retry(override: AiConfiguration? = null, turnIndex: Int? = null) {
         val snapshot = _uiState.value
-        if (snapshot.isStreaming || snapshot.turns.isEmpty() || snapshot.savingSettings) return
+        if (snapshot.activePaneIsStreaming || snapshot.turns.isEmpty() || snapshot.savingSettings) return
         val targetIndex = turnIndex ?: snapshot.turns.lastIndex
         if (targetIndex !in snapshot.turns.indices) return
         val targetTurn = snapshot.turns[targetIndex]
@@ -728,16 +866,7 @@ class OpenAIChatViewModel(
         } else {
             targetTurn.ai
         }
-        val original = baseAi.api
-        val configurations = snapshot.settings.credentialSources()
-        val api = if (original.authentication == AuthenticationMethod.ChatGpt) original.copy(
-            chatGptAccountId = original.chatGptAccountId ?: configurations.firstOrNull {
-                it.authentication == AuthenticationMethod.ChatGpt && it.chatGptAccountId != null
-            }?.chatGptAccountId,
-        ) else if (original.apiKey.isNotBlank()) original else original.copy(apiKey = configurations.firstOrNull {
-            it.authentication == AuthenticationMethod.ApiKey && it.apiKey.isNotBlank() &&
-                it.baseUrl.trimEnd('/') == original.baseUrl.trimEnd('/') && it.protocol == original.protocol
-        }?.apiKey.orEmpty())
+        val api = resolveApiCredentials(baseAi.api, snapshot.settings)
         val error = apiError(api, requireCredentials = true)
         if (error != null) { reportError(error); return }
         val resume = override == null && targetIndex == snapshot.turns.lastIndex &&
@@ -745,13 +874,23 @@ class OpenAIChatViewModel(
         rememberModelQuietly(api)
         if (override != null) {
             val normalizedOverride = override.copy(api = override.api.normalized())
-            val resolvedOverride = snapshot.settings.resolve(normalizedOverride)
-            val temp = if (resolvedOverride == snapshot.settings.aiFor(snapshot.selectedPreset)) null else normalizedOverride
-            update { it.copy(temporaryAi = temp, error = null) }
+            if (snapshot.isPaired && snapshot.activePairSlot == 1) {
+                setTemporarySecondaryAi(normalizedOverride, enableDual = false)
+            } else {
+                setTemporaryAi(normalizedOverride)
+            }
         }
+        val partnerId = snapshot.pairedPane?.chatId
+        val pairSlot = if (snapshot.pairedPane != null) snapshot.activePairSlot else null
         if (resume) {
             updateLast { it.copy(ai = baseAi.copy(api = api), status = TurnStatus.Recovering, error = null, cancelRequested = false) }
-            startRequest(RequestPurpose.Resume)
+            val current = _uiState.value
+            startPaneRequest(
+                ChatPaneState(current.chatId, current.chatTree, current.turns),
+                purpose = RequestPurpose.Resume,
+                pairedChatId = partnerId,
+                pairSlot = pairSlot,
+            )
         } else {
             val retriedTurn = targetTurn.copy(
                 ai = baseAi.copy(api = api),
@@ -767,67 +906,135 @@ class OpenAIChatViewModel(
                 responseId = null,
                 cancelRequested = false,
             )
+            lateinit var nextPane: ChatPaneState
             update { state ->
                 val baseTree = if (state.chatTree.isEmpty && state.turns.isNotEmpty()) ChatTree.fromLinear(state.turns) else state.chatTree
                 val targetNode = baseTree.activePath().getOrNull(targetIndex)
                 val nextTree = if (targetNode != null) baseTree.branchRetry(targetNode.id, retriedTurn)
                     else baseTree.appendTurn(retriedTurn)
+                nextPane = ChatPaneState(state.chatId, nextTree, nextTree.activeTurns())
                 state.copy(chatTree = nextTree, turns = nextTree.activeTurns(), error = null)
             }
-            startRequest(RequestPurpose.Retry)
+            startPaneRequest(nextPane, purpose = RequestPurpose.Retry, pairedChatId = partnerId, pairSlot = pairSlot)
         }
     }
 
-    private fun startRequest(purpose: RequestPurpose = RequestPurpose.Chat, targetNodeIds: List<String>? = null) {
+    private fun startPaneRequest(
+        pane: ChatPaneState,
+        purpose: RequestPurpose = RequestPurpose.Chat,
+        pairedChatId: String? = null,
+        pairSlot: Int? = null,
+    ) {
         val snapshot = _uiState.value
         try {
             observeRequest(requests.start(
                 SavedChat(
-                    id = snapshot.chatId,
+                    id = pane.chatId,
                     updatedAt = System.currentTimeMillis(),
                     selectedPreset = snapshot.selectedPreset,
-                    turns = snapshot.turns,
-                    tree = snapshot.chatTree.takeIf { it.hasBranches },
+                    turns = pane.turns,
+                    tree = pane.chatTree.takeIf { it.hasBranches },
+                    pairedChatId = pairedChatId,
+                    pairSlot = pairSlot,
                 ),
                 purpose,
-                targetNodeIds = targetNodeIds,
             ))
         } catch (error: Exception) {
             val failedMessage = "Could not start background work: ${error.message}"
-            if (!targetNodeIds.isNullOrEmpty()) {
-                update { state ->
-                    val nextTree = targetNodeIds.fold(state.chatTree) { tree, nodeId ->
-                        tree.updateNode(nodeId) { it.copy(status = TurnStatus.Failed, error = failedMessage) }
-                    }
-                    state.copy(chatTree = nextTree, turns = nextTree.activeTurns())
-                }
-            } else {
-                updateLast { it.copy(status = TurnStatus.Failed, error = failedMessage) }
+            updatePaneById(pane.chatId) { current ->
+                if (!current.chatTree.isEmpty) {
+                    val nextTree = current.chatTree.updateActiveLeaf { it.copy(status = TurnStatus.Failed, error = failedMessage) }
+                    current.copy(chatTree = nextTree, turns = nextTree.activeTurns())
+                } else if (current.turns.isNotEmpty()) {
+                    current.copy(turns = current.turns.dropLast(1) + current.turns.last().copy(status = TurnStatus.Failed, error = failedMessage))
+                } else current
             }
         }
     }
 
     private fun observeRequest(handle: ActiveChatRequest) {
-        requestUpdates?.cancel()
-        requestUpdates = viewModelScope.launch {
+        requestUpdates.remove(handle.chatId)?.cancel()
+        requestUpdates[handle.chatId] = viewModelScope.launch {
             handle.state.collect { saved ->
-                update {
-                    if (it.chatId == saved.id) it.copy(chatTree = saved.resolvedTree, turns = saved.turns) else it
+                update { state ->
+                    when {
+                        state.chatId == saved.id -> state.copy(chatTree = saved.resolvedTree, turns = saved.turns)
+                        state.pairedPane?.chatId == saved.id -> state.copy(
+                            pairedPane = ChatPaneState(saved.id, saved.resolvedTree, saved.turns),
+                        )
+                        else -> state
+                    }
                 }
             }
         }
     }
 
-    fun cancel() { requests.stop(_uiState.value.chatId) }
-    fun cancelNode(nodeId: String) { requests.stopNode(_uiState.value.chatId, nodeId) }
+    private fun clearRequestObservers() {
+        requestUpdates.values.forEach { it.cancel() }
+        requestUpdates.clear()
+    }
+
+    private fun updatePaneById(targetChatId: String, transform: (ChatPaneState) -> ChatPaneState) = update { state ->
+        when {
+            state.chatId == targetChatId -> {
+                val updated = transform(ChatPaneState(state.chatId, state.chatTree, state.turns))
+                state.copy(chatTree = updated.chatTree, turns = updated.turns)
+            }
+            state.pairedPane?.chatId == targetChatId -> state.copy(pairedPane = transform(state.pairedPane))
+            else -> state
+        }
+    }
+
+    fun cancel() {
+        val state = _uiState.value
+        requests.stop(state.chatId)
+        state.pairedPane?.let { requests.stop(it.chatId) }
+    }
+
+    fun cancelSlot(slot: Int) {
+        val state = _uiState.value
+        val targetId = if (slot == 0) state.primaryPane.chatId else state.secondaryPane?.chatId
+        if (targetId != null) requests.stop(targetId)
+    }
+
     fun newChat() {
         if (_uiState.value.preparingImages || _uiState.value.historyLoading || _uiState.value.capturingScreenshot) return
-        requestUpdates?.cancel()
+        clearRequestObservers()
         clearImageJobs()
         showHistory(false)
-        update { it.copy(chatId = UUID.randomUUID().toString(), ready = false, temporaryAi = null, chatTree = ChatTree(), turns = emptyList(), prompt = "", attachments = emptyList(),
-            croppingImageId = null, error = null) }
+        update { it.copy(chatId = UUID.randomUUID().toString(), ready = false, temporaryAi = null,
+            chatTree = ChatTree(), turns = emptyList(), pairedPane = null, activePairSlot = 0,
+            prompt = "", attachments = emptyList(), croppingImageId = null, error = null) }
         loadSettings()
+    }
+
+    private fun resolveApiCredentials(original: OpenAIModelConfig, settings: AppSettings): OpenAIModelConfig {
+        val configurations = settings.credentialSources()
+        return if (original.authentication == AuthenticationMethod.ChatGpt) original.copy(
+            chatGptAccountId = original.chatGptAccountId ?: configurations.firstOrNull {
+                it.authentication == AuthenticationMethod.ChatGpt && it.chatGptAccountId != null
+            }?.chatGptAccountId,
+        ) else if (original.apiKey.isNotBlank()) original else original.copy(apiKey = configurations.firstOrNull {
+            it.authentication == AuthenticationMethod.ApiKey && it.apiKey.isNotBlank() &&
+                it.baseUrl.trimEnd('/') == original.baseUrl.trimEnd('/') && it.protocol == original.protocol
+        }?.apiKey.orEmpty())
+    }
+
+    private fun restoreAiWithSettings(ai: AiConfiguration, settings: AppSettings): AiConfiguration {
+        val api = resolveApiCredentials(ai.api, settings)
+        val matchedConnection = settings.connections.firstOrNull { conn ->
+            conn.authentication == api.authentication &&
+                if (conn.authentication == AuthenticationMethod.ApiKey) {
+                    conn.baseUrl.trimEnd('/') == api.baseUrl.trimEnd('/') && conn.protocol == api.protocol
+                } else {
+                    conn.chatGptAccountId == api.chatGptAccountId
+                }
+        }
+        return if (matchedConnection != null) {
+            ai.copy(api = api.using(matchedConnection), connectionId = matchedConnection.id)
+        } else {
+            ai.copy(api = api)
+        }
     }
 
     private fun updateLast(transform: (ChatTurn) -> ChatTurn) = update { state ->

@@ -82,7 +82,7 @@ class ChatRequestRunner(
         }
         targets.forEachIndexed { index, nodeId ->
             val key = nodeId ?: LINEAR_EXECUTION_KEY
-            handle.executions[key] = NodeExecution(nodeId, isSecondary = targets.size > 1 && index > 0)
+            handle.executions[key] = NodeExecution(nodeId, isSecondary = chat.pairSlot == 1 || (targets.size > 1 && index > 0))
         }
         mutableActive.value = active.value + (chat.id to handle)
         handle.job = scope.launch(start = CoroutineStart.UNDISPATCHED) {

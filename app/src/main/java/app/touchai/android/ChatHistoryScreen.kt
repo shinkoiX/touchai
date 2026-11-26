@@ -119,8 +119,29 @@ fun ChatHistoryScreen(
                                 Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     maxLines = 2, overflow = TextOverflow.Ellipsis)
                             }
-                            Text(dateFormat.format(Date(entry.updatedAt)), style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                Text(dateFormat.format(Date(entry.updatedAt)), style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (entry.pairedChatId != null) {
+                                    val pairBadge = if (state.historyQuery.isNotBlank() && entry.pairSlot != null) {
+                                        "2× ${if (entry.pairSlot == 1) "B" else "A"}"
+                                    } else {
+                                        "2×"
+                                    }
+                                    Surface(
+                                        color = MaterialTheme.colorScheme.tertiaryContainer,
+                                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                                        shape = CircleShape,
+                                    ) {
+                                        Text(
+                                            pairBadge,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                        )
+                                    }
+                                }
+                            }
                             if (entry.pending) Text("Running", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                         }
                         AppIconButton(R.drawable.ic_delete, "Delete chat", { deleting = entry }, enabled = !state.historyLoading && !entry.pending)

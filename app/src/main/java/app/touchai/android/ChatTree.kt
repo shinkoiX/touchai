@@ -84,17 +84,17 @@ data class ChatTree(
         return ChatTree(nodes = nodes + created, activeLeafId = created.id)
     }
 
-    /** Appends two sibling turns under the current active leaf for dual-config comparison. */
-    fun appendDualTurns(
-        first: ChatTurn,
-        second: ChatTurn,
-        now: Long = System.currentTimeMillis(),
-    ): Pair<ChatTree, List<String>> {
-        val parentId = activePath().lastOrNull()?.id
-        val baseTimestamp = maxOf(now, (nodes.maxOfOrNull { it.createdAt } ?: 0L) + 1L)
-        val firstNode = ChatTreeNode(parentId = parentId, turn = first, createdAt = baseTimestamp)
-        val secondNode = ChatTreeNode(parentId = parentId, turn = second, createdAt = baseTimestamp + 1L)
-        return ChatTree(nodes = nodes + firstNode + secondNode, activeLeafId = firstNode.id) to listOf(firstNode.id, secondNode.id)
+    /** Clones this tree with fresh node IDs so a paired conversation starts with an independent copy of prior turns. */
+    fun cloneWithFreshIds(): ChatTree {
+        if (nodes.isEmpty()) return ChatTree()
+        val idMap = nodes.associate { it.id to UUID.randomUUID().toString() }
+        val clonedNodes = nodes.map { node ->
+            node.copy(
+                id = idMap.getValue(node.id),
+                parentId = node.parentId?.let(idMap::get),
+            )
+        }
+        return ChatTree(clonedNodes, activeLeafId?.let(idMap::get))
     }
 
     /** Creates a new sibling branch at the same parent as [targetNodeId], preserving the old branch and its subtree. */

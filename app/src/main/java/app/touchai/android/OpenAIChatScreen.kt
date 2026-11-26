@@ -148,18 +148,20 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding()) {
         if (!compactKeyboard) Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             BrandMark()
-            val api = state.selectedAi.api
-            val secondaryApi = state.selectedSecondaryAi?.api
-            val activeTier = if (api.authentication == AuthenticationMethod.ChatGpt) null
-                else wireServiceTier(api.requestProtocol, api.serviceTier)
+            val primaryApi = state.selectedAi.api
+            val secondaryApi = state.resolvedSecondaryAi.api
+            val activeApi = state.activeSlotAi.api
+            val activeTier = if (activeApi.authentication == AuthenticationMethod.ChatGpt) null
+                else wireServiceTier(activeApi.requestProtocol, activeApi.serviceTier)
+            val canOpenSwitcher = state.ready && if (state.isDualMode) !state.isStreaming else !state.activePaneIsStreaming
             Column(
                 Modifier
                     .weight(1f)
                     .padding(start = 8.dp)
                     .clip(MaterialTheme.shapes.medium)
-                    .clickable(enabled = state.ready && !state.isStreaming) {
+                    .clickable(enabled = canOpenSwitcher) {
                         keyboard?.hide()
-                        switcherInitialSlot = 0
+                        switcherInitialSlot = state.activePairSlot
                         switcherOpen = true
                     }
                     .padding(horizontal = 4.dp, vertical = 4.dp),
@@ -172,15 +174,21 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                             containerColor = MaterialTheme.colorScheme.tertiaryContainer,
                             contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
                         )
+                    } else if (state.isPaired) {
+                        ReplyMetaPill(
+                            text = if (state.activePairSlot == 1) "B" else "A",
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        )
                     }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                    val subtitle = if (state.isDualMode && secondaryApi != null) {
-                        val aLabel = api.model.ifBlank { "No model" }
+                    val subtitle = if (state.isDualMode) {
+                        val aLabel = primaryApi.model.ifBlank { "No model" }
                         val bLabel = secondaryApi.model.ifBlank { "No model" }
                         "$aLabel ⇄ $bLabel"
                     } else {
-                        listOfNotNull(api.model.ifBlank { "No model" }, api.reasoningEffort, activeTier).joinToString(" · ")
+                        listOfNotNull(activeApi.model.ifBlank { "No model" }, activeApi.reasoningEffort, activeTier).joinToString(" · ")
                     }
                     val subtitleColor = when {
                         state.isDualMode -> MaterialTheme.colorScheme.tertiary
@@ -195,8 +203,8 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
                     )
-                    if (!state.isDualMode && api.webSearch) AppIcon(R.drawable.ic_search, "Web search on", Modifier.padding(start = 2.dp), 14.dp, MaterialTheme.colorScheme.onSurfaceVariant)
-                    if (state.ready && !state.isStreaming) AppIcon(
+                    if (!state.isDualMode && activeApi.webSearch) AppIcon(R.drawable.ic_search, "Web search on", Modifier.padding(start = 2.dp), 14.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (canOpenSwitcher) AppIcon(
                         R.drawable.ic_expand,
                         "Switch model",
                         size = 16.dp,
@@ -208,6 +216,19 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
             AppIconButton(R.drawable.ic_history, "Chat history", { keyboard?.hide(); viewModel.showHistory(true) }, enabled = state.ready)
             AppIconButton(R.drawable.ic_settings, "Settings", openSettings, enabled = !state.isStreaming && state.ready)
             onClose?.let { AppIconButton(R.drawable.ic_close, "Close", it) }
+        }
+        val secondaryPane = state.secondaryPane
+        if (secondaryPane != null) {
+            PairedConversationTabsBar(
+                primaryPane = state.primaryPane,
+                secondaryPane = secondaryPane,
+                primaryFallbackAi = state.selectedAi,
+                secondaryFallbackAi = state.resolvedSecondaryAi,
+                activeSlot = state.activePairSlot,
+                showPerTabStop = state.runningCount > 1,
+                onSelectSlot = viewModel::selectPairSlot,
+                onStopSlot = viewModel::cancelSlot,
+            )
         }
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
@@ -226,19 +247,14 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                         UserMessage(turn)
                         AssistantMessage(
                             turn = turn,
-                            canRetry = !state.isStreaming,
+                            canRetry = !state.activePaneIsStreaming,
                             onRetry = { viewModel.retry(turnIndex = index) },
                             onRetryWithSwitch = { keyboard?.hide(); retrySwitchTarget = index to turn.ai },
                             branchIndex = branch?.index ?: 0,
                             branchCount = branch?.count ?: 1,
-                            compareTabs = branch?.compareTabs.orEmpty(),
-                            canSwitchBranch = !state.isStreaming,
+                            canSwitchBranch = !state.activePaneIsStreaming,
                             onPreviousBranch = { viewModel.switchBranch(index, -1) },
                             onNextBranch = { viewModel.switchBranch(index, 1) },
-                            onSelectCompareTab = viewModel::selectBranchNode,
-                            onStopTab = if (branch != null && branch.compareTabs.size >= 2 && turn.isRunning && turn.status != TurnStatus.Cancelling) {
-                                { viewModel.cancelNode(branch.nodeId) }
-                            } else null,
                         )
                     }
                     val images = state.attachments.filter { it.preview != null }
@@ -288,8 +304,9 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                             })
                         }
                     }
+                    val inputBlocked = if (state.isDualMode) state.isStreaming else state.activePaneIsStreaming
                     TextField(state.prompt, viewModel::setPrompt, placeholder = { Text("Message") }, modifier = Modifier.weight(1f),
-                        minLines = 1, maxLines = if (compact) 2 else 6, enabled = state.ready && !state.isStreaming,
+                        minLines = 1, maxLines = if (compact) 2 else 6, enabled = state.ready && !inputBlocked,
                         colors = TextFieldDefaults.colors(
                             focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, disabledContainerColor = Color.Transparent,
                             focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent, disabledIndicatorColor = Color.Transparent,
@@ -297,17 +314,22 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                         keyboardActions = KeyboardActions(onSend = { if (!loadingImage) send() }))
                     Box(Modifier.padding(bottom = 4.dp, end = 2.dp)) {
-                        val runningNodes = state.chatTree.runningNodes()
-                        val allCancelling = if (runningNodes.isEmpty()) state.turns.lastOrNull()?.status == TurnStatus.Cancelling
-                            else runningNodes.all { it.turn.status == TurnStatus.Cancelling }
+                        val activeStatuses = listOfNotNull(
+                            state.primaryPane.turns.lastOrNull()?.takeIf { it.isRunning }?.status,
+                            state.secondaryPane?.turns?.lastOrNull()?.takeIf { it.isRunning }?.status,
+                        )
+                        val allCancelling = activeStatuses.isNotEmpty() && activeStatuses.all { it == TurnStatus.Cancelling }
                         SendActionButton(
-                            isStreaming = state.isStreaming,
-                            runningCount = state.runningCount,
+                            isStreaming = inputBlocked,
+                            runningCount = if (state.isDualMode) state.runningCount else 1,
                             stopEnabled = !allCancelling,
                             isDualMode = state.isDualMode,
                             sendEnabled = state.ready && !loadingImage && !state.capturingScreenshot && state.canSendImages,
                             onSend = send,
-                            onStop = viewModel::cancel,
+                            onStop = {
+                                if (state.isDualMode) viewModel.cancel()
+                                else viewModel.cancelSlot(state.activePairSlot)
+                            },
                             onLongPressSend = {
                                 haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                 val openSlotB = viewModel.toggleDualModeByLongPress()
@@ -319,7 +341,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                                     val updated = viewModel.uiState.value
                                     val notice = if (updated.isDualMode) {
                                         val a = updated.selectedAi.api.model.ifBlank { "A" }
-                                        val b = updated.selectedSecondaryAi?.api?.model?.ifBlank { "B" } ?: "B"
+                                        val b = updated.resolvedSecondaryAi.api.model.ifBlank { "B" }
                                         "Dual send ON · $a ⇄ $b"
                                     } else {
                                         "Dual send OFF"
@@ -345,10 +367,11 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
             onReset = viewModel::clearTemporaryAi,
             allowDual = true,
             dualEnabled = state.isDualMode,
-            initialSecondary = state.selectedSecondaryAi ?: state.lastSecondaryAi ?: state.selectedAi,
+            initialSecondary = state.resolvedSecondaryAi,
             initialSlot = switcherInitialSlot,
+            editingSecondaryInSingleMode = state.isPaired && !state.isDualMode && state.activePairSlot == 1,
             onDualModeChange = viewModel::setDualMode,
-            onApplySecondary = viewModel::setTemporarySecondaryAi,
+            onApplySecondary = { viewModel.setTemporarySecondaryAi(it, enableDual = false) },
             onDismiss = { switcherOpen = false },
         )
     }
@@ -591,12 +614,9 @@ private fun AssistantMessage(
     onRetryWithSwitch: () -> Unit,
     branchIndex: Int,
     branchCount: Int,
-    compareTabs: List<CompareTabInfo>,
     canSwitchBranch: Boolean,
     onPreviousBranch: () -> Unit,
     onNextBranch: () -> Unit,
-    onSelectCompareTab: (String) -> Unit,
-    onStopTab: (() -> Unit)?,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
@@ -605,38 +625,32 @@ private fun AssistantMessage(
         (turn.isThinking || turn.reasoning.isNotEmpty())
     val turnTier = if (turn.ai.api.authentication == AuthenticationMethod.ChatGpt) null
         else wireServiceTier(turn.ai.api.requestProtocol, turn.ai.api.serviceTier)
-    val hasCompareTabs = compareTabs.size >= 2
-    val showBranchStepper = if (hasCompareTabs) branchCount > compareTabs.size else branchCount > 1
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        if (hasCompareTabs) {
-            CompareTabsBar(tabs = compareTabs, onSelect = onSelectCompareTab)
-        } else {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                BrandMark(22.dp)
-                Text(
-                    turn.ai.api.model,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = muted,
-                    modifier = Modifier.padding(start = 2.dp).weight(1f, fill = false),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            BrandMark(22.dp)
+            Text(
+                turn.ai.api.model,
+                style = MaterialTheme.typography.labelMedium,
+                color = muted,
+                modifier = Modifier.padding(start = 2.dp).weight(1f, fill = false),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            ReplyMetaPill(
+                text = turn.ai.api.reasoningEffort ?: "default",
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = muted,
+            )
+            turnTier?.let { tier ->
                 ReplyMetaPill(
-                    text = turn.ai.api.reasoningEffort ?: "default",
-                    containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
-                    contentColor = muted,
+                    text = tier,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 )
-                turnTier?.let { tier ->
-                    ReplyMetaPill(
-                        text = tier,
-                        containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-                    )
-                }
             }
         }
         turn.searchStatus?.let {
@@ -674,10 +688,7 @@ private fun AssistantMessage(
         if (turn.status == TurnStatus.Stopped) Text("Stopped", style = MaterialTheme.typography.labelMedium, color = muted)
         turn.error?.let { MessageBanner(it, error = true) }
         val copyText = turn.answer.ifEmpty { turn.reasoning }
-        if (copyText.isNotEmpty() || canRetry || showBranchStepper || onStopTab != null) Row(Modifier.offset(x = (-12).dp), verticalAlignment = Alignment.CenterVertically) {
-            if (onStopTab != null) IconButton(onClick = onStopTab) {
-                AppIcon(R.drawable.ic_stop, "Stop this reply", size = 18.dp, tint = MaterialTheme.colorScheme.error)
-            }
+        if (copyText.isNotEmpty() || canRetry || branchCount > 1) Row(Modifier.offset(x = (-12).dp), verticalAlignment = Alignment.CenterVertically) {
             if (copyText.isNotEmpty()) IconButton(onClick = {
                 context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("AI response", copyText))
             }) { AppIcon(R.drawable.ic_copy, "Copy", size = 18.dp, tint = muted) }
@@ -685,7 +696,7 @@ private fun AssistantMessage(
                 IconButton(onClick = onRetry) { AppIcon(R.drawable.ic_refresh, "Retry", size = 18.dp, tint = muted) }
                 IconButton(onClick = onRetryWithSwitch) { AppIcon(R.drawable.ic_tune, "Switch model and retry", size = 18.dp, tint = muted) }
             }
-            if (showBranchStepper) {
+            if (branchCount > 1) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
                         onClick = onPreviousBranch,
@@ -713,63 +724,94 @@ private fun AssistantMessage(
 }
 
 @Composable
-private fun CompareTabsBar(
-    tabs: List<CompareTabInfo>,
-    onSelect: (String) -> Unit,
+private fun PairedConversationTabsBar(
+    primaryPane: ChatPaneState,
+    secondaryPane: ChatPaneState,
+    primaryFallbackAi: AiConfiguration,
+    secondaryFallbackAi: AiConfiguration,
+    activeSlot: Int,
+    showPerTabStop: Boolean,
+    onSelectSlot: (Int) -> Unit,
+    onStopSlot: (Int) -> Unit,
 ) {
+    val entries = listOf(
+        Triple(0, primaryPane, primaryFallbackAi),
+        Triple(1, secondaryPane, secondaryFallbackAi),
+    )
     Surface(
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.surfaceContainer,
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
     ) {
-        val rowModifier = if (tabs.size > 2) {
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(4.dp)
-        } else {
-            Modifier.fillMaxWidth().padding(4.dp)
-        }
-        Row(rowModifier, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-            tabs.forEachIndexed { index, tab ->
-                val tabModifier = if (tabs.size == 2) Modifier.weight(1f) else Modifier.widthIn(min = 136.dp, max = 200.dp)
-                val tier = if (tab.turn.ai.api.authentication == AuthenticationMethod.ChatGpt) null
-                    else wireServiceTier(tab.turn.ai.api.requestProtocol, tab.turn.ai.api.serviceTier)
-                val meta = listOfNotNull(tab.turn.ai.api.reasoningEffort ?: "default", tier).joinToString(" · ")
-                val slotTag = ('A' + index).toString()
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(4.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            entries.forEach { (slot, pane, fallbackAi) ->
+                val isSelected = activeSlot == slot
+                val lastTurn = pane.turns.lastOrNull()
+                val displayAi = lastTurn?.ai ?: fallbackAi
+                val tier = if (displayAi.api.authentication == AuthenticationMethod.ChatGpt) null
+                    else wireServiceTier(displayAi.api.requestProtocol, displayAi.api.serviceTier)
+                val slotTag = if (slot == 0) "A" else "B"
+                val status = lastTurn?.status ?: TurnStatus.Completed
+                val subtitle = buildList {
+                    if (pane.turns.isNotEmpty()) add("${pane.turns.size}t")
+                    add(displayAi.api.reasoningEffort ?: "default")
+                    tier?.let(::add)
+                }.joinToString(" · ")
                 Surface(
-                    onClick = { onSelect(tab.nodeId) },
+                    onClick = { onSelectSlot(slot) },
                     shape = MaterialTheme.shapes.small,
-                    color = if (tab.selected) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent,
-                    border = if (tab.selected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)) else null,
-                    modifier = tabModifier.semantics {
-                        selected = tab.selected
-                        contentDescription = "Reply tab $slotTag: ${tab.turn.ai.api.model}"
+                    color = if (isSelected) MaterialTheme.colorScheme.surfaceContainerHighest else Color.Transparent,
+                    border = if (isSelected) BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f)) else null,
+                    modifier = Modifier.weight(1f).semantics {
+                        selected = isSelected
+                        contentDescription = "Conversation $slotTag: ${displayAi.api.model}"
                     },
                 ) {
-                    Column(
+                    Row(
                         modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        Column(
+                            modifier = Modifier.weight(1f),
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
-                            CompareTabStatusDot(tab.turn.status)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                CompareTabStatusDot(status)
+                                Text(
+                                    text = "$slotTag · ${displayAi.api.model.ifBlank { "Model $slotTag" }}",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
                             Text(
-                                text = tab.turn.ai.api.model.ifBlank { "Model $slotTag" },
-                                style = MaterialTheme.typography.labelMedium,
-                                fontWeight = if (tab.selected) FontWeight.SemiBold else FontWeight.Medium,
-                                color = if (tab.selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                                text = subtitle,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f),
                             )
                         }
-                        Text(
-                            text = meta,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        if (showPerTabStop && pane.isRunning && status != TurnStatus.Cancelling) {
+                            IconButton(
+                                onClick = { onStopSlot(slot) },
+                                modifier = Modifier.size(28.dp),
+                            ) {
+                                AppIcon(R.drawable.ic_stop, "Stop conversation $slotTag", size = 15.dp, tint = MaterialTheme.colorScheme.error)
+                            }
+                        }
                     }
                 }
             }

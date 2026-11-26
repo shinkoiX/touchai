@@ -16,7 +16,7 @@ class ChatHistoryArchive(private val history: ChatHistoryRepository) {
             writer.append("{\"format\":\"touchai-chat-history\",\"chats\":[")
             entries.forEachIndexed { index, entry ->
                 val chat = history.load(entry.id)
-                val body = encodeChatBody(chat.selectedPreset, chat.turns, chat.tree) { null }
+                val body = encodeChatBody(chat.selectedPreset, chat.turns, chat.tree, chat.pairedChatId, chat.pairSlot) { null }
                 val value = buildJsonObject {
                     put("id", chat.id)
                     put("updatedAt", chat.updatedAt)
@@ -35,8 +35,12 @@ class ChatHistoryArchive(private val history: ChatHistoryRepository) {
             val archive = input.bufferedReader().use { Json.parseToJsonElement(it.readText()).jsonObject }
             require(archive.getValue("format").jsonPrimitive.content == "touchai-chat-history") { "Choose a TouchAI history export." }
             // Decode and validate the entire external file before writing any conversations.
-            val chats = archive.getValue("chats").jsonArray.map { item ->
+            val idMap = HashMap<String, String>()
+            val rawChats = archive.getValue("chats").jsonArray.map { item ->
                 val value = item.jsonObject
+                val sourceId = value["id"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
+                val newId = UUID.randomUUID().toString()
+                if (sourceId != null) idMap[sourceId] = newId
                 val decodedBody = decodeChatBody(value) { "" }
                 suspend fun sanitizeTurn(decoded: ChatTurn): ChatTurn {
                     val turn = decoded.copy(responseId = null, cancelRequested = false,
@@ -60,8 +64,22 @@ class ChatHistoryArchive(private val history: ChatHistoryRepository) {
                 }
                 val turns = tree?.activeTurns() ?: decodedBody.turns.map { sanitizeTurn(it) }
                 require(turns.isNotEmpty()) { "A chat contains no messages." }
-                SavedChat(UUID.randomUUID().toString(), value.getValue("updatedAt").jsonPrimitive.long,
-                    decodedBody.selectedPreset, turns, tree?.takeIf { it.hasBranches })
+                SavedChat(
+                    id = newId,
+                    updatedAt = value.getValue("updatedAt").jsonPrimitive.long,
+                    selectedPreset = decodedBody.selectedPreset,
+                    turns = turns,
+                    tree = tree?.takeIf { it.hasBranches },
+                    pairedChatId = decodedBody.pairedChatId,
+                    pairSlot = decodedBody.pairSlot,
+                )
+            }
+            val chats = rawChats.map { chat ->
+                val mappedPartner = chat.pairedChatId?.let { idMap[it] }
+                chat.copy(
+                    pairedChatId = mappedPartner,
+                    pairSlot = if (mappedPartner != null) chat.pairSlot else null,
+                )
             }
             chats.forEach { history.save(it) }
             chats.size
