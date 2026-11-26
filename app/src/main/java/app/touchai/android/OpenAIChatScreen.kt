@@ -40,6 +40,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.LayoutCoordinates
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -51,6 +53,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
@@ -61,12 +65,16 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.touchai.core.markdown.StreamingMarkdown
+import app.touchai.core.markdown.applyHighlightSpans
+import app.touchai.core.markdown.findHighlightRanges
 import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.OpenAIImage
 import app.touchai.core.openai.wireServiceTier
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 @Composable
 fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime,
@@ -128,6 +136,41 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
     }
     val scrollState = rememberScrollState()
     var followOutput by remember { mutableStateOf(true) }
+    val searchTerms = remember(state.searchHighlightQuery) { tokenizeSearchQuery(state.searchHighlightQuery) }
+    val searchMatches = remember(state.turns, state.searchHighlightQuery) {
+        if (state.searchHighlightQuery.isBlank()) emptyList()
+        else findChatSearchMatches(state.turns, state.searchHighlightQuery)
+    }
+    val clampedMatchIndex = if (searchMatches.isEmpty()) 0 else state.searchMatchIndex.coerceIn(0, searchMatches.lastIndex)
+    val activeSearchMatch = searchMatches.getOrNull(clampedMatchIndex)
+    var viewportHeightPx by remember { mutableFloatStateOf(0f) }
+    var scrollContentCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    val activeMatchKey = activeSearchMatch?.let { "${state.chatId}:${state.searchHighlightQuery}:$clampedMatchIndex" }
+    var activeMatchAnchor by remember(activeMatchKey) { mutableStateOf<Pair<LayoutCoordinates, Float>?>(null) }
+    var scrolledKey by remember { mutableStateOf<String?>(null) }
+    var lastScrolledTarget by remember(activeMatchKey) { mutableIntStateOf(-1) }
+
+    LaunchedEffect(state.chatId, state.searchHighlightQuery) {
+        if (state.searchHighlightQuery.isNotBlank()) {
+            followOutput = false
+        }
+    }
+    LaunchedEffect(activeMatchKey, activeMatchAnchor, scrollContentCoords, viewportHeightPx, scrollState.maxValue) {
+        val key = activeMatchKey ?: return@LaunchedEffect
+        val (anchorCoords, yOffsetPx) = activeMatchAnchor ?: return@LaunchedEffect
+        val contentCoords = scrollContentCoords ?: return@LaunchedEffect
+        val maxScroll = scrollState.maxValue
+        if (maxScroll == Int.MAX_VALUE || viewportHeightPx <= 0f || !anchorCoords.isAttached || !contentCoords.isAttached) return@LaunchedEffect
+        val yInContent = contentCoords.localPositionOf(anchorCoords, Offset(0f, yOffsetPx)).y
+        val desiredOffset = viewportHeightPx * 0.30f
+        val clampedTarget = (yInContent - desiredOffset).roundToInt().coerceIn(0, maxScroll)
+        if (scrolledKey != key || abs(clampedTarget - lastScrolledTarget) > 24) {
+            followOutput = false
+            scrollState.animateScrollTo(clampedTarget)
+            scrolledKey = key
+            lastScrolledTarget = clampedTarget
+        }
+    }
     LaunchedEffect(scrollState) {
         snapshotFlow { scrollState.value to scrollState.isScrollInProgress }.collect { (position, scrolling) ->
             if (scrolling) followOutput = position >= scrollState.maxValue - 48
@@ -135,7 +178,9 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
     }
     LaunchedEffect(scrollState) {
         snapshotFlow { scrollState.maxValue }.collect { maximum ->
-            if (followOutput && !scrollState.isScrollInProgress) scrollState.scrollTo(maximum)
+            if (followOutput && state.searchHighlightQuery.isBlank() && !scrollState.isScrollInProgress) {
+                scrollState.scrollTo(maximum)
+            }
         }
     }
     val openSettings = { viewModel.loadSettings(); viewModel.showSettings(true) }
@@ -230,7 +275,25 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                 onStopSlot = viewModel::cancelSlot,
             )
         }
-        Box(Modifier.weight(1f).fillMaxWidth()) {
+        if (state.searchHighlightQuery.isNotBlank()) {
+            ChatSearchHighlightBar(
+                query = state.searchHighlightQuery,
+                matchIndex = clampedMatchIndex,
+                matchCount = searchMatches.size,
+                locationLabel = activeSearchMatch?.locationLabel(),
+                onPrevious = { viewModel.stepSearchMatch(-1, searchMatches.size) },
+                onNext = { viewModel.stepSearchMatch(1, searchMatches.size) },
+                onClear = viewModel::clearSearchHighlight,
+            )
+        }
+        Box(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .onGloballyPositioned { coords ->
+                    viewportHeightPx = coords.size.height.toFloat()
+                },
+        ) {
             when {
                 !state.ready -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                     if (state.error == null) CircularProgressIndicator()
@@ -240,11 +303,26 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                     showSetup = !quickAccess.connected || (quickAccess.options.notification && !quickAccess.notificationsAllowed),
                     onSetup = openSettings,
                 )
-                else -> Column(Modifier.fillMaxSize().verticalScroll(scrollState).padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(20.dp)) {
+                else -> Column(
+                    Modifier
+                        .fillMaxSize()
+                        .verticalScroll(scrollState)
+                        .onGloballyPositioned { scrollContentCoords = it }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(20.dp),
+                ) {
+                    val reportActivePosition: (LayoutCoordinates, Float) -> Unit = { coords, yOffsetPx ->
+                        activeMatchAnchor = coords to yOffsetPx
+                    }
                     state.turns.forEachIndexed { index, turn ->
                         val branch = state.branchInfo(index)
-                        UserMessage(turn)
+                        val turnActiveMatch = activeSearchMatch?.takeIf { it.turnIndex == index }
+                        UserMessage(
+                            turn = turn,
+                            highlightTerms = searchTerms,
+                            activeMatch = turnActiveMatch?.takeIf { it.section == SearchMatchSection.User },
+                            onActiveMatchPositioned = reportActivePosition,
+                        )
                         AssistantMessage(
                             turn = turn,
                             canRetry = !state.activePaneIsStreaming,
@@ -255,6 +333,9 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                             canSwitchBranch = !state.activePaneIsStreaming,
                             onPreviousBranch = { viewModel.switchBranch(index, -1) },
                             onNextBranch = { viewModel.switchBranch(index, 1) },
+                            highlightTerms = searchTerms,
+                            activeMatch = turnActiveMatch?.takeIf { it.section != SearchMatchSection.User },
+                            onActiveMatchPositioned = reportActivePosition,
                         )
                     }
                     val images = state.attachments.filter { it.preview != null }
@@ -530,14 +611,115 @@ private fun PresetChip(label: String, selected: Boolean, enabled: Boolean, isDua
 }
 
 @Composable
-private fun UserMessage(turn: ChatTurn) {
+private fun ChatSearchHighlightBar(
+    query: String,
+    matchIndex: Int,
+    matchCount: Int,
+    locationLabel: String?,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onClear: () -> Unit,
+) {
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f)),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 4.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            AppIcon(R.drawable.ic_search, null, size = 16.dp, tint = MaterialTheme.colorScheme.primary)
+            Column(Modifier.weight(1f)) {
+                Text(
+                    text = query,
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                val statusText = if (matchCount > 0) {
+                    listOfNotNull("${matchIndex + 1}/$matchCount", locationLabel).joinToString(" · ")
+                } else {
+                    "No matches in this conversation"
+                }
+                Text(
+                    text = statusText,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (matchCount > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            IconButton(onClick = onPrevious, enabled = matchCount > 1, modifier = Modifier.size(34.dp)) {
+                AppIcon(R.drawable.ic_arrow_up, "Previous match", size = 18.dp)
+            }
+            IconButton(onClick = onNext, enabled = matchCount > 1, modifier = Modifier.size(34.dp)) {
+                AppIcon(R.drawable.ic_arrow_down, "Next match", size = 18.dp)
+            }
+            IconButton(onClick = onClear, modifier = Modifier.size(34.dp)) {
+                AppIcon(R.drawable.ic_close, "Clear search highlight", size = 18.dp)
+            }
+        }
+    }
+}
+
+@Composable
+private fun UserMessage(
+    turn: ChatTurn,
+    highlightTerms: List<String> = emptyList(),
+    activeMatch: ChatSearchMatch? = null,
+    onActiveMatchPositioned: ((coords: LayoutCoordinates, yOffsetPx: Float) -> Unit)? = null,
+) {
+    var textLayout by remember(turn.user.text) { mutableStateOf<TextLayoutResult?>(null) }
+    var textCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
+    LaunchedEffect(activeMatch, textLayout, textCoords) {
+        val match = activeMatch ?: return@LaunchedEffect
+        val coords = textCoords ?: return@LaunchedEffect
+        if (!coords.isAttached) return@LaunchedEffect
+        val layout = textLayout
+        val yOffset = if (layout != null && turn.user.text.isNotEmpty()) {
+            val offset = match.start.coerceIn(0, turn.user.text.lastIndex)
+            layout.getLineTop(layout.getLineForOffset(offset))
+        } else {
+            0f
+        }
+        onActiveMatchPositioned?.invoke(coords, yOffset)
+    }
     Box(Modifier.fillMaxWidth().padding(start = 48.dp), contentAlignment = Alignment.CenterEnd) {
         Surface(color = MaterialTheme.colorScheme.primaryContainer, contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-            shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp)) {
+            shape = RoundedCornerShape(20.dp, 20.dp, 6.dp, 20.dp),
+            border = if (activeMatch != null) BorderStroke(1.5.dp, Color(0xFFFFB300)) else null) {
             Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 turn.presetName?.let { Text(it, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold) }
                 turn.user.images.forEach { SentImage(it) }
-                if (turn.user.text.isNotBlank()) SelectionContainer { Text(turn.user.text, style = MaterialTheme.typography.bodyLarge) }
+                if (turn.user.text.isNotBlank()) {
+                    val activeOrdinal = remember(turn.user.text, highlightTerms, activeMatch) {
+                        activeMatch?.let { match ->
+                            findHighlightRanges(turn.user.text.substring(0, match.start.coerceIn(0, turn.user.text.length)), highlightTerms).size
+                        }
+                    }
+                    val displayText = remember(turn.user.text, highlightTerms, activeOrdinal) {
+                        if (highlightTerms.isEmpty()) AnnotatedString(turn.user.text)
+                        else applyHighlightSpans(AnnotatedString(turn.user.text), highlightTerms, activeOrdinal)
+                    }
+                    SelectionContainer {
+                        Text(
+                            text = displayText,
+                            style = MaterialTheme.typography.bodyLarge,
+                            onTextLayout = { textLayout = it },
+                            modifier = if (activeMatch != null) {
+                                Modifier.onGloballyPositioned { coords ->
+                                    textCoords = coords
+                                }
+                            } else Modifier,
+                        )
+                    }
+                }
             }
         }
     }
@@ -617,6 +799,9 @@ private fun AssistantMessage(
     canSwitchBranch: Boolean,
     onPreviousBranch: () -> Unit,
     onNextBranch: () -> Unit,
+    highlightTerms: List<String> = emptyList(),
+    activeMatch: ChatSearchMatch? = null,
+    onActiveMatchPositioned: ((coords: LayoutCoordinates, yOffsetPx: Float) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
@@ -662,25 +847,66 @@ private fun AssistantMessage(
         turn.imageGenerationStatus?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
         turn.recoveryStatus?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary) }
         if (turn.reasoning.isNotEmpty() || activelyThinking) {
-            ReasoningSection(turn.reasoning, activelyThinking, defaultExpanded = turn.answer.isEmpty() && turn.generatedImages.isEmpty())
+            val reasoningMatch = activeMatch?.takeIf { it.section == SearchMatchSection.Reasoning }
+            ReasoningSection(
+                reasoning = turn.reasoning,
+                activelyThinking = activelyThinking,
+                defaultExpanded = turn.answer.isEmpty() && turn.generatedImages.isEmpty(),
+                forceExpanded = reasoningMatch != null,
+                highlightTerms = highlightTerms,
+                activeMatchOffset = reasoningMatch?.start,
+                onActiveMatchPositioned = onActiveMatchPositioned,
+            )
         }
         if (turn.answer.isEmpty() && turn.reasoning.isEmpty() && !activelyThinking && turn.generatedImages.isEmpty() && turn.isRunning) {
             CircularProgressIndicator(Modifier.padding(vertical = 4.dp).size(18.dp), strokeWidth = 2.dp)
         }
         if (turn.answer.isNotEmpty()) {
             val markdown = remember(turn.answer, turn.citations) { citationMarkdown(turn.answer, turn.citations) }
-            SelectionContainer { StreamingMarkdown(markdown, turn.status == TurnStatus.Streaming, Modifier.fillMaxWidth()) }
+            val answerMatch = activeMatch?.takeIf { it.section == SearchMatchSection.Answer }
+            SelectionContainer {
+                StreamingMarkdown(
+                    text = markdown,
+                    isStreaming = turn.status == TurnStatus.Streaming,
+                    modifier = Modifier.fillMaxWidth(),
+                    highlightTerms = highlightTerms,
+                    activeMatchOffset = answerMatch?.start,
+                    onActiveMatchPositioned = onActiveMatchPositioned,
+                )
+            }
         }
         turn.generatedImages.forEach { output -> key(output.id) { SentImage(output.image, "Generated image") } }
         val sources = turn.citations.distinctBy { it.url }
         if (sources.isNotEmpty()) Column {
             sources.forEachIndexed { sourceIndex, citation ->
-                Row(Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).clickable { uriHandler.openUri(citation.url) }.padding(vertical = 6.dp, horizontal = 4.dp),
+                val citationMatch = activeMatch?.takeIf { it.section == SearchMatchSection.Citation && it.citationIndex == sourceIndex }
+                val activeOrdinal = remember(citation.title, highlightTerms, citationMatch) {
+                    citationMatch?.let { match ->
+                        findHighlightRanges(citation.title.substring(0, match.start.coerceIn(0, citation.title.length)), highlightTerms).size
+                    }
+                }
+                val titleDisplay = remember(citation.title, highlightTerms, activeOrdinal) {
+                    if (highlightTerms.isEmpty()) AnnotatedString(citation.title)
+                    else applyHighlightSpans(AnnotatedString(citation.title), highlightTerms, activeOrdinal)
+                }
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(MaterialTheme.shapes.small)
+                        .clickable { uriHandler.openUri(citation.url) }
+                        .then(
+                            if (citationMatch != null && onActiveMatchPositioned != null) {
+                                Modifier.onGloballyPositioned { coords ->
+                                    onActiveMatchPositioned(coords, 0f)
+                                }
+                            } else Modifier,
+                        )
+                        .padding(vertical = 6.dp, horizontal = 4.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Box(Modifier.size(20.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceContainerHigh), contentAlignment = Alignment.Center) {
                         Text("${sourceIndex + 1}", style = MaterialTheme.typography.labelSmall)
                     }
-                    Text(citation.title, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary,
+                    Text(titleDisplay, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.primary,
                         maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
@@ -869,7 +1095,15 @@ private fun ReplyMetaPill(text: String, containerColor: Color, contentColor: Col
 }
 
 @Composable
-private fun ReasoningSection(reasoning: String, activelyThinking: Boolean, defaultExpanded: Boolean) {
+private fun ReasoningSection(
+    reasoning: String,
+    activelyThinking: Boolean,
+    defaultExpanded: Boolean,
+    forceExpanded: Boolean = false,
+    highlightTerms: List<String> = emptyList(),
+    activeMatchOffset: Int? = null,
+    onActiveMatchPositioned: ((coords: LayoutCoordinates, yOffsetPx: Float) -> Unit)? = null,
+) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val accent = if (activelyThinking) MaterialTheme.colorScheme.primary else muted
     if (reasoning.isEmpty()) {
@@ -885,7 +1119,8 @@ private fun ReasoningSection(reasoning: String, activelyThinking: Boolean, defau
         return
     }
     var userExpanded by remember { mutableStateOf<Boolean?>(null) }
-    val expanded = userExpanded ?: defaultExpanded
+    LaunchedEffect(forceExpanded) { if (forceExpanded) userExpanded = true }
+    val expanded = userExpanded ?: (defaultExpanded || forceExpanded)
     val rotation by animateFloatAsState(if (expanded) 180f else 0f, label = "thoughtsChevron")
     val railColor = if (activelyThinking) MaterialTheme.colorScheme.primary.copy(alpha = 0.55f)
         else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.85f)
@@ -939,6 +1174,9 @@ private fun ReasoningSection(reasoning: String, activelyThinking: Boolean, defau
                             textColor = muted.copy(alpha = 0.9f),
                             fontSize = 13.sp,
                             lineHeight = 20.sp,
+                            highlightTerms = highlightTerms,
+                            activeMatchOffset = activeMatchOffset,
+                            onActiveMatchPositioned = onActiveMatchPositioned,
                         )
                     }
                 }

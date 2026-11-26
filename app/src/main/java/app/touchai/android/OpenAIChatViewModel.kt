@@ -112,6 +112,8 @@ data class OpenAIChatUiState(
     val turns: List<ChatTurn> = emptyList(),
     val pairedPane: ChatPaneState? = null,
     val activePairSlot: Int = 0,
+    val searchHighlightQuery: String = "",
+    val searchMatchIndex: Int = 0,
     val error: String? = null,
 ) {
     val isPaired: Boolean get() = pairedPane != null
@@ -250,10 +252,20 @@ class OpenAIChatViewModel(
                 turns = other.turns,
                 pairedPane = currentPane,
                 activePairSlot = target,
+                searchMatchIndex = 0,
                 error = null,
             )
         }
     }
+    fun stepSearchMatch(delta: Int, totalMatches: Int) {
+        if (totalMatches <= 0) return
+        update { state ->
+            val current = state.searchMatchIndex.coerceIn(0, totalMatches - 1)
+            val next = ((current + delta) % totalMatches + totalMatches) % totalMatches
+            state.copy(searchMatchIndex = next)
+        }
+    }
+    fun clearSearchHighlight() = update { it.copy(searchHighlightQuery = "", searchMatchIndex = 0) }
     /**
      * Toggles dual-send mode on long-press of the Send button.
      * Returns true when enabling dual mode for the first time without a distinct 2nd AI configured,
@@ -440,6 +452,7 @@ class OpenAIChatViewModel(
 
     fun openChat(id: String) {
         if (_uiState.value.historyLoading) return
+        val openingSearchQuery = _uiState.value.historyQuery.trim()
         historySearchJob?.cancel()
         update { it.copy(historyLoading = true, historySearching = false, error = null) }
         historyJob = viewModelScope.launch {
@@ -502,6 +515,8 @@ class OpenAIChatViewModel(
                         historyOpen = false,
                         historyQuery = "",
                         historySnippets = emptyMap(),
+                        searchHighlightQuery = openingSearchQuery,
+                        searchMatchIndex = 0,
                     )
                 }
                 active?.let(::observeRequest)
@@ -809,6 +824,8 @@ class OpenAIChatViewModel(
                     chatTree = activePane.chatTree,
                     turns = activePane.turns,
                     pairedPane = otherPane,
+                    searchHighlightQuery = "",
+                    searchMatchIndex = 0,
                 )
             }
             rememberModelQuietly(primaryAi.api)
@@ -837,6 +854,8 @@ class OpenAIChatViewModel(
                     error = null,
                     chatTree = nextTree,
                     turns = nextTree.activeTurns(),
+                    searchHighlightQuery = "",
+                    searchMatchIndex = 0,
                 )
             }
             rememberModelQuietly(ai.api)
@@ -1004,6 +1023,7 @@ class OpenAIChatViewModel(
         showHistory(false)
         update { it.copy(chatId = UUID.randomUUID().toString(), ready = false, temporaryAi = null,
             chatTree = ChatTree(), turns = emptyList(), pairedPane = null, activePairSlot = 0,
+            searchHighlightQuery = "", searchMatchIndex = 0,
             prompt = "", attachments = emptyList(), croppingImageId = null, error = null) }
         loadSettings()
     }
