@@ -56,7 +56,7 @@ class ChatHistoryTransferInstrumentedTest {
         compose.setContent {
             TouchAiTheme {
                 val state by viewModel.uiState.collectAsStateWithLifecycle()
-                if (state.historyOpen) ChatHistoryScreen(state, viewModel::openChat, viewModel::deleteChat, viewModel::newChat,
+                if (state.historyOpen) ChatHistoryScreen(state, viewModel::setHistoryQuery, viewModel::openChat, viewModel::deleteChat, viewModel::newChat,
                     { viewModel.showHistory(true) }, { viewModel.exportHistory { output } },
                     { viewModel.importHistory { output.toByteArray().inputStream() } }, { viewModel.showHistory(false) })
                 else OpenAIChatScreen(viewModel, (compose.activity.application as TouchAiApplication).quickAccess,

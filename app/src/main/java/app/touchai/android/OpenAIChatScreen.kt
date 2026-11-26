@@ -97,7 +97,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
         return
     }
     if (state.historyOpen) {
-        ChatHistoryScreen(state, viewModel::openChat, viewModel::deleteChat, viewModel::newChat,
+        ChatHistoryScreen(state, viewModel::setHistoryQuery, viewModel::openChat, viewModel::deleteChat, viewModel::newChat,
             { viewModel.showHistory(true) }, { exportHistory.launch("touchai-chat-history.json") },
             { importHistory.launch(arrayOf("application/json", "text/plain", "application/octet-stream")) },
             { viewModel.showHistory(false) })

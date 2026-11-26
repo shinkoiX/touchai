@@ -8,12 +8,14 @@ import java.net.URI
 import java.net.URISyntaxException
 import java.io.InputStream
 import java.io.OutputStream
+import java.util.Locale
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -74,9 +76,12 @@ data class OpenAIChatUiState(
     val logsOpen: Boolean = false,
     val historyOpen: Boolean = false,
     val historyLoading: Boolean = false,
+    val historySearching: Boolean = false,
     val historyTransferring: Boolean = false,
     val historyNotice: String? = null,
+    val historyQuery: String = "",
     val historyEntries: List<ChatHistoryEntry> = emptyList(),
+    val historySnippets: Map<String, String> = emptyMap(),
     val chatId: String = UUID.randomUUID().toString(),
     val settingsDraft: AppSettings? = null,
     val savingSettings: Boolean = false,
@@ -113,6 +118,7 @@ class OpenAIChatViewModel(
     private var captureRequested = false
     private var presetSaveJob: Job? = null
     private var historyJob: Job? = null
+    private var historySearchJob: Job? = null
 
     init {
         loadSettings()
@@ -155,17 +161,85 @@ class OpenAIChatViewModel(
     fun showHistory(open: Boolean) {
         if (_uiState.value.historyTransferring) return
         historyJob?.cancel()
-        update { it.copy(historyOpen = open, historyLoading = open, historyNotice = null, error = null) }
+        historySearchJob?.cancel()
+        val query = if (open) _uiState.value.historyQuery else ""
+        update {
+            it.copy(
+                historyOpen = open,
+                historyLoading = open,
+                historySearching = false,
+                historyQuery = query,
+                historySnippets = if (open) it.historySnippets else emptyMap(),
+                historyNotice = null,
+                error = null,
+            )
+        }
         if (open) historyJob = viewModelScope.launch {
             try {
-                val entries = (history.list() + requests.active.value.values.map { it.state.value.entry })
-                    .associateBy { it.id }.values.sortedByDescending { it.updatedAt }
-                update { it.copy(historyEntries = entries) }
+                if (query.isBlank()) {
+                    val entries = loadHistoryEntries()
+                    update { it.copy(historyEntries = entries, historySnippets = emptyMap()) }
+                } else {
+                    val results = searchHistoryResults(query)
+                    update {
+                        it.copy(
+                            historyEntries = results.map { result -> result.entry },
+                            historySnippets = results.toSnippetMap(),
+                        )
+                    }
+                }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { reportError("Could not load chat history: ${error.message}") }
             finally { if (currentCoroutineContext().isActive) update { it.copy(historyLoading = false) } }
         }
     }
+
+    fun setHistoryQuery(query: String) {
+        if (_uiState.value.historyTransferring) return
+        if (query == _uiState.value.historyQuery) return
+        historyJob?.cancel()
+        historySearchJob?.cancel()
+        val blank = query.isBlank()
+        update { it.copy(historyQuery = query, historyLoading = false, historySearching = true, error = null) }
+        historySearchJob = viewModelScope.launch {
+            try {
+                if (!blank) delay(SEARCH_DEBOUNCE_MILLIS)
+                val results = searchHistoryResults(query)
+                update {
+                    it.copy(
+                        historyEntries = results.map { result -> result.entry },
+                        historySnippets = results.toSnippetMap(),
+                    )
+                }
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { reportError("Could not search chat history: ${error.message}") }
+            finally { if (currentCoroutineContext().isActive) update { it.copy(historySearching = false) } }
+        }
+    }
+
+    private suspend fun loadHistoryEntries(): List<ChatHistoryEntry> =
+        (history.list() + requests.active.value.values.map { it.state.value.entry })
+            .associateBy { it.id }.values.sortedByDescending { it.updatedAt }
+
+    private suspend fun searchHistoryResults(query: String): List<ChatHistorySearchResult> {
+        val terms = tokenizeSearchQuery(query)
+        if (terms.isEmpty()) return loadHistoryEntries().map { ChatHistorySearchResult(it) }
+        val stored = history.search(query).associateBy { it.entry.id }.toMutableMap()
+        for (active in requests.active.value.values) {
+            val chat = active.state.value
+            val matched = matchChat(chat, query)
+            if (matched != null) stored[chat.id] = matched else stored.remove(chat.id)
+        }
+        return stored.values.sortedWith(
+            compareByDescending<ChatHistorySearchResult> { result ->
+                val titleLower = result.entry.title.lowercase(Locale.ROOT)
+                terms.all { titleLower.contains(it) }
+            }.thenByDescending { it.entry.updatedAt },
+        )
+    }
+
+    private fun List<ChatHistorySearchResult>.toSnippetMap(): Map<String, String> =
+        mapNotNull { result -> result.snippet?.let { snippet -> result.entry.id to snippet } }.toMap()
 
     fun exportHistory(openOutput: () -> OutputStream) = transferHistory("Exported") {
         ChatHistoryArchive(history).exportTo(openOutput())
@@ -177,12 +251,26 @@ class OpenAIChatViewModel(
 
     private fun transferHistory(action: String, transfer: suspend () -> Int) {
         if (_uiState.value.historyLoading || _uiState.value.isStreaming) return
-        update { it.copy(historyLoading = true, historyTransferring = true, historyNotice = null, error = null) }
+        historySearchJob?.cancel()
+        update { it.copy(historyLoading = true, historySearching = false, historyTransferring = true, historyNotice = null, error = null) }
         viewModelScope.launch {
             try {
                 val count = withContext(Dispatchers.IO) { transfer() }
-                val entries = history.list()
-                update { it.copy(historyEntries = entries, historyNotice = "$action $count ${if (count == 1) "chat" else "chats"}") }
+                val query = _uiState.value.historyQuery
+                val notice = "$action $count ${if (count == 1) "chat" else "chats"}"
+                if (query.isBlank()) {
+                    val entries = loadHistoryEntries()
+                    update { it.copy(historyEntries = entries, historySnippets = emptyMap(), historyNotice = notice) }
+                } else {
+                    val results = searchHistoryResults(query)
+                    update {
+                        it.copy(
+                            historyEntries = results.map { result -> result.entry },
+                            historySnippets = results.toSnippetMap(),
+                            historyNotice = notice,
+                        )
+                    }
+                }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) {
                 reportError("${if (action == "Imported") "Import" else "Export"} failed: ${error.message}")
@@ -192,7 +280,8 @@ class OpenAIChatViewModel(
 
     fun openChat(id: String) {
         if (_uiState.value.historyLoading) return
-        update { it.copy(historyLoading = true, error = null) }
+        historySearchJob?.cancel()
+        update { it.copy(historyLoading = true, historySearching = false, error = null) }
         historyJob = viewModelScope.launch {
             try {
                 requests.restorePending()
@@ -202,7 +291,8 @@ class OpenAIChatViewModel(
                 val selected = chat.selectedPreset?.takeIf { id -> settings.presets.any { it.id == id } }
                 clearImageJobs()
                 update { it.copy(chatId = chat.id, turns = chat.turns, settings = settings, ready = true,
-                    selectedPreset = selected, prompt = "", attachments = emptyList(), croppingImageId = null, historyOpen = false) }
+                    selectedPreset = selected, prompt = "", attachments = emptyList(), croppingImageId = null,
+                    historyOpen = false, historyQuery = "", historySnippets = emptyMap()) }
                 requestUpdates?.cancel()
                 active?.let(::observeRequest)
             } catch (error: CancellationException) { throw error }
@@ -219,6 +309,7 @@ class OpenAIChatViewModel(
             try {
                 history.delete(id)
                 update { it.copy(historyEntries = it.historyEntries.filterNot { entry -> entry.id == id },
+                    historySnippets = it.historySnippets - id,
                     chatId = if (it.chatId == id) UUID.randomUUID().toString() else it.chatId,
                     turns = if (it.chatId == id) emptyList() else it.turns) }
             } catch (error: CancellationException) { throw error }
@@ -470,6 +561,10 @@ class OpenAIChatViewModel(
     private fun update(transform: (OpenAIChatUiState) -> OpenAIChatUiState) { _uiState.update(transform) }
     private fun rememberedPreset(settings: AppSettings) = settings.lastPresetId?.takeIf { id -> settings.presets.any { it.id == id } }
     private fun presetText(settings: AppSettings, id: String?) = settings.presets.find { it.id == id }?.prompt.orEmpty()
+
+    private companion object {
+        const val SEARCH_DEBOUNCE_MILLIS = 120L
+    }
 }
 
 private fun ApiConnection.normalized() = copy(name = name.trim(), baseUrl = baseUrl.trim().trimEnd('/'), apiKey = apiKey.trim())

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <application>
+        <receiver
+            android:name=".DebugApiImportReceiver"
+            android:exported="true"
+            tools:ignore="ExportedReceiver">
+            <intent-filter>
+                <action android:name="app.touchai.android.debug.IMPORT_API_CONFIG" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>

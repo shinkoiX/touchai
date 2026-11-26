@@ -506,4 +506,92 @@ class OpenAIChatViewModelTest {
         assertNotNull(settingsError(settings.copy(api = settings.api.copy(baseUrl = "https://example.com/v1/responses"))))
         assertNull(settingsError(settings.copy(api = settings.api.copy(reasoningEffort = "custom-effort"))))
     }
+
+    @Test fun historySearchDebouncesFiltersIncludesActiveRequestsAndResetsOnClose() = runTest {
+        val turnTemplate = ChatTurn(
+            ChatMessage(MessageRole.User, "Alpha prompt"),
+            AiConfiguration(settings.api),
+            answer = "First response about Kotlin coroutines",
+            status = TurnStatus.Completed,
+        )
+        history.save(SavedChat("chat-1", 10, null, listOf(turnTemplate)))
+        history.save(SavedChat("chat-2", 20, null, listOf(turnTemplate.copy(
+            user = ChatMessage(MessageRole.User, "Database tuning"),
+            answer = "Add a trigram or bigram index for fast search",
+        ))))
+        val gate = CompletableDeferred<Unit>()
+        val vm = testChatViewModel(history, Repository(settings), client {
+            flow {
+                emit(OpenAIStreamEvent.TextDelta("Streaming live-token answer"))
+                gate.await()
+                emit(completed)
+            }
+        })
+        runCurrent()
+
+        // Start a live streaming chat in the background.
+        vm.setPrompt("Live question")
+        vm.submit()
+        runCurrent()
+        val liveChatId = vm.uiState.value.chatId
+
+        vm.showHistory(true)
+        advanceUntilIdle()
+        assertEquals(3, vm.uiState.value.historyEntries.size)
+
+        // Rapid typing cancels intermediate debounced searches and applies only the final query.
+        vm.setHistoryQuery("k")
+        vm.setHistoryQuery("kot")
+        vm.setHistoryQuery("coroutines")
+        advanceUntilIdle()
+        assertEquals(listOf("chat-1"), vm.uiState.value.historyEntries.map { it.id })
+        assertTrue(vm.uiState.value.historySnippets["chat-1"]!!.contains("coroutines"))
+
+        // Searching finds text from currently streaming requests as well.
+        vm.setHistoryQuery("live-token")
+        advanceUntilIdle()
+        assertEquals(listOf(liveChatId), vm.uiState.value.historyEntries.map { it.id })
+
+        // Clearing search restores the full list immediately.
+        vm.setHistoryQuery("")
+        advanceUntilIdle()
+        assertEquals(3, vm.uiState.value.historyEntries.size)
+        assertTrue(vm.uiState.value.historySnippets.isEmpty())
+
+        // Closing history clears the active search query.
+        vm.setHistoryQuery("bigram")
+        advanceUntilIdle()
+        assertEquals(listOf("chat-2"), vm.uiState.value.historyEntries.map { it.id })
+        vm.showHistory(false)
+        assertEquals("", vm.uiState.value.historyQuery)
+        assertTrue(vm.uiState.value.historySnippets.isEmpty())
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+    }
+
+    @Test fun deletingChatWhileSearchingKeepsActiveFilterIntact() = runTest {
+        val baseTurn = ChatTurn(
+            ChatMessage(MessageRole.User, "Searchable first"),
+            AiConfiguration(settings.api),
+            answer = "Shared keyword",
+            status = TurnStatus.Completed,
+        )
+        history.save(SavedChat("first", 10, null, listOf(baseTurn)))
+        history.save(SavedChat("second", 20, null, listOf(baseTurn.copy(user = ChatMessage(MessageRole.User, "Searchable second")))))
+        val vm = testChatViewModel(history, Repository(settings), client { flow { emit(completed) } })
+        runCurrent()
+        vm.showHistory(true)
+        advanceUntilIdle()
+        vm.setHistoryQuery("Shared keyword")
+        advanceUntilIdle()
+        assertEquals(listOf("second", "first"), vm.uiState.value.historyEntries.map { it.id })
+
+        vm.deleteChat("second")
+        advanceUntilIdle()
+        assertEquals("Shared keyword", vm.uiState.value.historyQuery)
+        assertEquals(listOf("first"), vm.uiState.value.historyEntries.map { it.id })
+        assertNull(vm.uiState.value.historySnippets["second"])
+        assertNotNull(vm.uiState.value.historySnippets["first"])
+    }
 }
