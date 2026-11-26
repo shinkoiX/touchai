@@ -21,6 +21,7 @@ class DataStoreSettingsRepository(
     private val cipher: ApiKeyCipher,
 ) : SettingsRepository {
     val quickAccess = store.data.map(::readQuickAccess).distinctUntilChanged()
+    val recentModels = store.data.map(::readRecentModels).distinctUntilChanged()
 
     override suspend fun load(): AppSettings = withContext(Dispatchers.IO) {
         val prefs = store.data.first()
@@ -103,6 +104,47 @@ class DataStoreSettingsRepository(
 
     override suspend fun rememberPreset(id: String?) {
         store.edit { it[LastPreset] = id ?: "" }
+    }
+
+    override suspend fun loadRecentModels(): List<RecentModelEntry> = withContext(Dispatchers.IO) {
+        readRecentModels(store.data.first())
+    }
+
+    override suspend fun rememberModel(model: String, endpointKey: String) {
+        rememberModels(listOf(RecentModelEntry(model, endpointKey)))
+    }
+
+    override suspend fun rememberModels(entries: List<RecentModelEntry>) {
+        val cleaned = entries.mapNotNull { entry ->
+            val id = entry.model.trim()
+            if (id.isEmpty()) null else RecentModelEntry(id, entry.endpointKey.trim())
+        }
+        if (cleaned.isEmpty()) return
+        withContext(Dispatchers.IO) {
+            store.edit { prefs ->
+                val merged = mergeRecentModels(readRecentModels(prefs), cleaned)
+                prefs[RecentModels] = buildJsonArray {
+                    merged.forEach { item ->
+                        add(buildJsonObject {
+                            put("model", item.model)
+                            if (item.endpointKey.isNotEmpty()) put("endpoint", item.endpointKey)
+                        })
+                    }
+                }.toString()
+            }
+        }
+    }
+
+    private fun readRecentModels(prefs: Preferences): List<RecentModelEntry> {
+        val raw = prefs[RecentModels] ?: return emptyList()
+        return runCatching {
+            Json.parseToJsonElement(raw).jsonArray.mapNotNull { element ->
+                val obj = element.jsonObject
+                val model = obj["model"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf(String::isNotEmpty) ?: return@mapNotNull null
+                val endpoint = obj["endpoint"]?.jsonPrimitive?.contentOrNull?.trim().orEmpty()
+                RecentModelEntry(model, endpoint)
+            }
+        }.getOrDefault(emptyList())
     }
 
     suspend fun saveButtonPosition(onRight: Boolean, y: Float) {
@@ -207,5 +249,27 @@ class DataStoreSettingsRepository(
         val AttachScreenshotAutomatically = booleanPreferencesKey("attach_screenshot_automatically")
         val ButtonOnRight = booleanPreferencesKey("button_on_right")
         val ButtonY = floatPreferencesKey("button_y")
+        val RecentModels = stringPreferencesKey("recent_models")
     }
+}
+
+internal fun mergeRecentModels(
+    existing: List<RecentModelEntry>,
+    additions: List<RecentModelEntry>,
+    maxSize: Int = 50,
+): List<RecentModelEntry> {
+    val result = ArrayList<RecentModelEntry>(minOf(existing.size + additions.size, maxSize))
+    val seen = HashSet<RecentModelEntry>()
+    // Additions are applied in order, so the last element in [additions] becomes the most recent.
+    for (item in additions.asReversed()) {
+        val normalized = RecentModelEntry(item.model.trim(), item.endpointKey.trim())
+        if (normalized.model.isEmpty()) continue
+        if (seen.add(normalized)) result.add(normalized)
+        if (result.size >= maxSize) return result
+    }
+    for (item in existing) {
+        if (seen.add(item)) result.add(item)
+        if (result.size >= maxSize) break
+    }
+    return result
 }

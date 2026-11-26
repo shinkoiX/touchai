@@ -43,16 +43,49 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
     }
 
     private fun createStream(config: OpenAIModelConfig, request: OpenAIRequest, onCheckpoint: (String) -> Unit): Flow<OpenAIStreamEvent> = flow {
-        val bodyWithSummary = buildRequestBody(config, request, includeReasoningSummary = true)
-        val bodyWithoutSummary = buildRequestBody(config, request, includeReasoningSummary = false)
-        if (bodyWithSummary != bodyWithoutSummary) {
-            var fallback = false
-            streamWithBody(config, bodyWithSummary, allowSummaryFallback = true, onSummaryRejected = { fallback = true }, onCheckpoint = onCheckpoint)
-            if (fallback) {
-                streamWithBody(config, bodyWithoutSummary, allowSummaryFallback = false, onSummaryRejected = {}, onCheckpoint = onCheckpoint)
+        val originalEffort = config.reasoningEffort?.trim()?.takeIf(String::isNotEmpty)
+        var currentConfig = config.copy(reasoningEffort = originalEffort)
+        var includeSummary = true
+        val triedEfforts = linkedSetOf<String?>(originalEffort?.lowercase())
+        var attempts = 0
+        while (attempts < 6) {
+            attempts++
+            val bodyWithSummary = buildRequestBody(currentConfig, request, includeReasoningSummary = includeSummary)
+            val bodyWithoutSummary = buildRequestBody(currentConfig, request, includeReasoningSummary = false)
+            val allowSummaryFallback = includeSummary && bodyWithSummary != bodyWithoutSummary && attempts < 6
+            var rejectedSummary = false
+            var rejectedEffortBody: String? = null
+            streamWithBody(
+                config = currentConfig,
+                requestBody = bodyWithSummary,
+                allowSummaryFallback = allowSummaryFallback,
+                allowEffortFallback = currentConfig.reasoningEffort != null && attempts < 6,
+                onConnected = {
+                    if (originalEffort != null && currentConfig.reasoningEffort != originalEffort) {
+                        emit(OpenAIStreamEvent.EffortAdjusted(originalEffort, currentConfig.reasoningEffort))
+                    }
+                },
+                onSummaryRejected = { rejectedSummary = true },
+                onEffortRejected = { rejectedEffortBody = it },
+                onCheckpoint = onCheckpoint,
+            )
+            if (rejectedSummary) {
+                includeSummary = false
+                continue
             }
-        } else {
-            streamWithBody(config, bodyWithSummary, allowSummaryFallback = false, onSummaryRejected = {}, onCheckpoint = onCheckpoint)
+            val effortError = rejectedEffortBody
+            if (effortError != null && originalEffort != null) {
+                val decision = nextFallbackEffort(currentConfig.requestProtocol, originalEffort, triedEfforts, effortError)
+                if (decision.shouldRetry && attempts < 6) {
+                    triedEfforts.add(decision.nextEffort?.lowercase())
+                    currentConfig = currentConfig.copy(reasoningEffort = decision.nextEffort)
+                    continue
+                }
+                emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(effortError)))
+                val message = errorMessage(effortError)
+                throw OpenAIRequestException(listOfNotNull("HTTP 400", message).joinToString(": "), 400)
+            }
+            return@flow
         }
     }
 
@@ -60,7 +93,10 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
         config: OpenAIModelConfig,
         requestBody: JsonObject,
         allowSummaryFallback: Boolean,
+        allowEffortFallback: Boolean,
+        onConnected: suspend () -> Unit,
         onSummaryRejected: () -> Unit,
+        onEffortRejected: (String) -> Unit,
         onCheckpoint: (String) -> Unit,
     ) {
         var responseId: String? = null
@@ -73,9 +109,15 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
         }.execute { response ->
             if (!response.status.isSuccess()) {
                 val body = response.bodyAsText()
-                if (allowSummaryFallback && response.status == HttpStatusCode.BadRequest && isReasoningSummaryRejected(config, body)) {
-                    onSummaryRejected()
-                    return@execute
+                if (response.status == HttpStatusCode.BadRequest) {
+                    if (allowEffortFallback && isReasoningEffortRejected(config, body)) {
+                        onEffortRejected(body)
+                        return@execute
+                    }
+                    if (allowSummaryFallback && isReasoningSummaryRejected(config, body)) {
+                        onSummaryRejected()
+                        return@execute
+                    }
                 }
                 emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(body)))
                 val message = errorMessage(body) ?: response.status.description.takeIf(String::isNotBlank)
@@ -86,6 +128,7 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                 emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(response.bodyAsText())))
                 throw OpenAIStreamException("The endpoint did not return an event stream. Check the API protocol.")
             }
+            onConnected()
 
             val parser = SseByteParser()
             val channel = response.bodyAsChannel()
@@ -234,7 +277,8 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                 is OpenAIStreamEvent.ImageGenerated -> images += event.value
                 is OpenAIStreamEvent.ThinkingStarted,
                 is OpenAIStreamEvent.SearchStatus, is OpenAIStreamEvent.Citation,
-                is OpenAIStreamEvent.ImageGenerationStatus, is OpenAIStreamEvent.ResponsePayload -> Unit
+                is OpenAIStreamEvent.ImageGenerationStatus, is OpenAIStreamEvent.ResponsePayload,
+                is OpenAIStreamEvent.EffortAdjusted -> Unit
                 is OpenAIStreamEvent.ResponseCheckpoint, is OpenAIStreamEvent.RecoveryStatus -> Unit
             }
         }

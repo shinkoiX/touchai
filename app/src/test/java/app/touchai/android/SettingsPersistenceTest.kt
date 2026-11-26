@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.first
 import app.touchai.core.openai.ApiProtocol
 import app.touchai.core.openai.AuthenticationMethod
+import app.touchai.core.openai.AvailableModel
 import app.touchai.core.openai.OpenAIModelConfig
 import java.util.Base64
 import javax.crypto.AEADBadTagException
@@ -199,5 +200,58 @@ class SettingsPersistenceTest {
         val bytes = Base64.getDecoder().decode(cipher.encrypt("test-only-secret"))
         bytes[bytes.lastIndex] = (bytes.last().toInt() xor 1).toByte()
         cipher.decrypt(Base64.getEncoder().encodeToString(bytes))
+    }
+
+    @Test fun recentModelsPersistInMruOrderAndPrioritizeListing() = runBlocking {
+        val file = temporaryFolder.newFolder().resolve("recent-models.preferences_pb")
+        val openAiKey = "api:Responses:https://api.openai.com/v1"
+        val proxyKey = "api:Responses:https://proxy.example.com/v1"
+        val geminiKey = "api:Gemini:https://generativelanguage.googleapis.com/v1beta"
+        val firstScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val repo = DataStoreSettingsRepository(PreferenceDataStoreFactory.create(scope = firstScope) { file }, cipher)
+            repo.rememberModel("   ", openAiKey)
+            repo.rememberModel("gpt-4o", openAiKey)
+            repo.rememberModel("gemini-2.5-pro", geminiKey)
+            repo.rememberModel("gpt-5.4", openAiKey)
+            repo.rememberModel("gpt-4o", openAiKey) // Promote gpt-4o back to most recent.
+            assertEquals(
+                listOf(
+                    RecentModelEntry("gpt-4o", openAiKey),
+                    RecentModelEntry("gpt-5.4", openAiKey),
+                    RecentModelEntry("gemini-2.5-pro", geminiKey),
+                ),
+                repo.loadRecentModels(),
+            )
+        } finally { firstScope.coroutineContext[Job]!!.cancelAndJoin() }
+
+        val secondScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val repo = DataStoreSettingsRepository(PreferenceDataStoreFactory.create(scope = secondScope) { file }, cipher)
+            val recent = repo.loadRecentModels()
+            assertEquals(3, recent.size)
+
+            val catalog = listOf(
+                AvailableModel("gpt-3.5", "gpt-3.5"),
+                AvailableModel("gpt-5.4", "GPT-5.4"),
+                AvailableModel("o3", "o3"),
+                AvailableModel("gpt-4o", "GPT-4o"),
+            )
+            // Same-endpoint MRU models float to the top; unrelated Gemini models do not pollute the list.
+            val openAiOrdered = prioritizeModels(catalog, recent, openAiKey)
+            assertEquals(listOf("gpt-4o", "gpt-5.4", "gpt-3.5", "o3"), openAiOrdered.map { it.model.id })
+            assertEquals(listOf(true, true, false, false), openAiOrdered.map { it.recent })
+
+            // On a different proxy endpoint that also lists gpt-5.4, cross-endpoint history still floats it up,
+            // while same-endpoint usage ranks even higher.
+            val withProxyHistory = mergeRecentModels(recent, listOf(RecentModelEntry("o3", proxyKey)))
+            val proxyOrdered = prioritizeModels(catalog, withProxyHistory, proxyKey)
+            assertEquals(listOf("o3", "gpt-4o", "gpt-5.4", "gpt-3.5"), proxyOrdered.map { it.model.id })
+
+            // When catalog is empty, fall back only to models previously used with the same endpoint.
+            val fallback = prioritizeModels(emptyList(), recent, openAiKey, allowRecentFallback = true)
+            assertEquals(listOf("gpt-4o", "gpt-5.4"), fallback.map { it.model.id })
+            assertTrue(prioritizeModels(emptyList(), recent, openAiKey, allowRecentFallback = false).isEmpty())
+        } finally { secondScope.coroutineContext[Job]!!.cancelAndJoin() }
     }
 }

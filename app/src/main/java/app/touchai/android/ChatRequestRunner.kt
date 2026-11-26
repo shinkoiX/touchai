@@ -8,6 +8,13 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 
+data class EffortAdjustmentNotice(
+    val chatId: String,
+    val presetId: String?,
+    val requested: String,
+    val applied: String?,
+)
+
 class ActiveChatRequest internal constructor(chat: SavedChat) {
     internal val mutableState = MutableStateFlow(chat)
     val state = mutableState.asStateFlow()
@@ -32,6 +39,8 @@ class ChatRequestRunner(
     val active = mutableActive.asStateFlow()
     private val mutableError = MutableStateFlow<String?>(null)
     val recoveryError = mutableError.asStateFlow()
+    private val mutableEffortAdjustments = MutableSharedFlow<EffortAdjustmentNotice>(extraBufferCapacity = 8)
+    val effortAdjustments = mutableEffortAdjustments.asSharedFlow()
     private val restoreMutex = Mutex()
 
     fun find(chatId: String): ActiveChatRequest? = active.value[chatId]
@@ -131,6 +140,10 @@ class ChatRequestRunner(
                     is OpenAIStreamEvent.RecoveryStatus -> update(handle) { it.copy(
                         status = if (it.cancelRequested) TurnStatus.Cancelling else if (event.status != null) TurnStatus.Recovering else TurnStatus.Streaming,
                         recoveryStatus = event.status) }
+                    is OpenAIStreamEvent.EffortAdjusted -> {
+                        update(handle) { it.copy(ai = it.ai.copy(api = it.ai.api.copy(reasoningEffort = event.applied))) }
+                        mutableEffortAdjustments.tryEmit(EffortAdjustmentNotice(handle.chatId, initial.selectedPreset, event.requested, event.applied))
+                    }
                     is OpenAIStreamEvent.ResponsePayload -> Unit
                 }
                 val now = System.nanoTime()

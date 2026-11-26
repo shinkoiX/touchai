@@ -61,6 +61,8 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
         var responsePayload: JsonElement? = null
         val responseEvents = mutableListOf<JsonElement>()
         var responseId = request.resumeResponseId
+        var adjustedEffort: String? = null
+        var effortWasAdjusted = false
         // Finish is non-cancellable so Stop records the partial result as well.
         try {
             logs.started(record.copy(data = redactLogCredentials(record.data, config.apiKey).jsonObject))
@@ -92,6 +94,10 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
                     is OpenAIStreamEvent.ImageGenerated -> images[event.value.id] = event.value
                     is OpenAIStreamEvent.Completed -> responsePayload = event.response
                     is OpenAIStreamEvent.ResponsePayload -> responseEvents += event.value
+                    is OpenAIStreamEvent.EffortAdjusted -> {
+                        effortWasAdjusted = true
+                        adjustedEffort = event.applied
+                    }
                     else -> Unit
                 }
                 emit(event)
@@ -124,6 +130,7 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
             val result = buildJsonObject {
                 put("status", status)
                 responseId?.let { put("responseId", it) }
+                if (effortWasAdjusted) put("appliedReasoningEffort", adjustedEffort ?: "default")
                 put("durationMillis", elapsed())
                 firstReasoningMillis?.let { put("firstReasoningMillis", it) }
                 firstTextMillis?.let { put("firstTextMillis", it) }

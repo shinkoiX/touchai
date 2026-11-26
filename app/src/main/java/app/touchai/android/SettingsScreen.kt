@@ -23,6 +23,9 @@ import app.touchai.core.openai.ApiProtocol
 import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.GeminiBaseUrl
 import app.touchai.core.openai.OpenAIModelConfig
+import app.touchai.core.openai.ReasoningEffortTiers
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import java.net.URI
 import java.util.UUID
 import kotlin.math.roundToInt
@@ -288,16 +291,72 @@ private fun AiConfigurationEditor(value: AiConfiguration, connections: List<ApiC
             onChange(value.copy(connectionId = selected.id, api = if (sameModels) value.api else value.api.copy(model = "")))
         }
         ModelField(connection, value.api.model) { model -> api { it.copy(model = model) } }
-        Text("Reasoning effort", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        val efforts = listOf(null, "low", "medium", "high")
-        Choices(efforts, { it == value.api.reasoningEffort }, { it?.replaceFirstChar(Char::uppercase) ?: "Default" }) { effort ->
-            api { it.copy(reasoningEffort = effort) }
-        }
-        OutlinedTextField(value.api.reasoningEffort ?: "", { effort -> api { it.copy(reasoningEffort = effort.takeIf(String::isNotBlank)) } },
-            label = { Text("Custom effort") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+        ReasoningEffortEditor(value.api.reasoningEffort) { effort -> api { it.copy(reasoningEffort = effort) } }
         OutlinedTextField(value.instructions, { onChange(value.copy(instructions = it)) }, label = { Text("Instructions") }, minLines = 2, modifier = Modifier.fillMaxWidth())
     }
     SwitchRow("Web search", value.api.webSearch, { search -> api { it.copy(webSearch = search) } })
     if (connection?.supportsBackgroundResponses == true) SwitchRow("Recover interrupted responses", value.api.backgroundResponses,
         { enabled -> api { it.copy(backgroundResponses = enabled) } })
+}
+
+@Composable
+private fun ReasoningEffortEditor(effort: String?, onChange: (String?) -> Unit) {
+    val tiers = ReasoningEffortTiers
+    val normalized = effort?.trim()?.lowercase()
+    val exactIndex = tiers.indexOf(normalized)
+    val sliderIndex = when {
+        exactIndex >= 0 -> exactIndex
+        normalized == "minimal" -> 0
+        else -> 2
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+            Text("Reasoning effort", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    effort ?: "Default",
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (effort != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (effort != null) {
+                    TextButton(onClick = { onChange(null) }, contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                        modifier = Modifier.heightIn(min = 28.dp)) {
+                        Text("Reset", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+        }
+        Slider(
+            value = sliderIndex.toFloat(),
+            onValueChange = { raw -> onChange(tiers[raw.roundToInt().coerceIn(0, tiers.lastIndex)]) },
+            valueRange = 0f..tiers.lastIndex.toFloat(),
+            steps = tiers.size - 2,
+            modifier = Modifier.fillMaxWidth().semantics { contentDescription = "Reasoning effort" },
+        )
+        Row(Modifier.fillMaxWidth()) {
+            tiers.forEachIndexed { index, tier ->
+                val selected = index == exactIndex
+                val label = if (tier == "medium") "med" else tier
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                    color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    modifier = Modifier.weight(1f).clickable { onChange(tier) }.padding(vertical = 2.dp),
+                )
+            }
+        }
+        Spacer(Modifier.height(4.dp))
+        OutlinedTextField(
+            value = effort ?: "",
+            onValueChange = { text -> onChange(text.takeIf(String::isNotBlank)) },
+            label = { Text("Custom effort") },
+            placeholder = { Text("Default (none / minimal / low / medium / high / xhigh / max)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }

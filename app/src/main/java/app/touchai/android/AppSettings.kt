@@ -171,8 +171,25 @@ private fun connection(connections: List<ApiConnection>, id: String) = connectio
 fun AppSettings.attachScreenshotFor(presetId: String?): Boolean =
     presets.find { it.id == presetId }?.attachScreenshot ?: quickAccess.attachScreenshotAutomatically
 
+data class RecentModelEntry(val model: String, val endpointKey: String = "")
+
+fun ApiConnection.recentEndpointKey(): String = when (authentication) {
+    AuthenticationMethod.ChatGpt -> "chatgpt:${chatGptAccountId.orEmpty()}"
+    AuthenticationMethod.ApiKey -> "api:${protocol.name}:${baseUrl.trim().trimEnd('/')}"
+}
+
+fun OpenAIModelConfig.recentEndpointKey(): String = when (authentication) {
+    AuthenticationMethod.ChatGpt -> "chatgpt:${chatGptAccountId.orEmpty()}"
+    AuthenticationMethod.ApiKey -> "api:${protocol.name}:${baseUrl.trim().trimEnd('/')}"
+}
+
 interface SettingsRepository {
     suspend fun load(): AppSettings
     suspend fun save(settings: AppSettings)
     suspend fun rememberPreset(id: String?)
+    suspend fun loadRecentModels(): List<RecentModelEntry> = emptyList()
+    suspend fun rememberModel(model: String, endpointKey: String = "") {}
+    suspend fun rememberModels(entries: List<RecentModelEntry>) {
+        entries.forEach { rememberModel(it.model, it.endpointKey) }
+    }
 }

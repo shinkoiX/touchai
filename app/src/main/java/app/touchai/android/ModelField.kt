@@ -15,20 +15,73 @@ import app.touchai.core.openai.OpenAIModelConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 
+internal data class ModelOption(val model: AvailableModel, val recent: Boolean)
+
+/**
+ * Reorders [catalog] so previously used models appear at the top in most-recently-used order
+ * (same-endpoint history first, then matches from other endpoints), keeping remaining models
+ * in their original provider order. When [catalog] is empty and [allowRecentFallback] is true,
+ * falls back to models previously used with [endpointKey].
+ */
+internal fun prioritizeModels(
+    catalog: List<AvailableModel>,
+    recentModels: List<RecentModelEntry>,
+    endpointKey: String?,
+    allowRecentFallback: Boolean = true,
+): List<ModelOption> {
+    if (catalog.isEmpty()) {
+        if (!allowRecentFallback || endpointKey.isNullOrBlank()) return emptyList()
+        return recentModels
+            .asSequence()
+            .filter { it.endpointKey == endpointKey }
+            .map { it.model }
+            .distinct()
+            .map { ModelOption(AvailableModel(it, it), recent = true) }
+            .toList()
+    }
+    if (recentModels.isEmpty()) return catalog.map { ModelOption(it, recent = false) }
+
+    val rank = LinkedHashMap<String, Int>()
+    if (!endpointKey.isNullOrBlank()) {
+        for (entry in recentModels) {
+            if (entry.endpointKey == endpointKey) rank.putIfAbsent(entry.model, rank.size)
+        }
+    }
+    for (entry in recentModels) {
+        rank.putIfAbsent(entry.model, rank.size)
+    }
+
+    val recentOptions = ArrayList<Pair<Int, AvailableModel>>()
+    val otherOptions = ArrayList<AvailableModel>(catalog.size)
+    for (candidate in catalog) {
+        val r = rank[candidate.id]
+        if (r != null) recentOptions.add(r to candidate) else otherOptions.add(candidate)
+    }
+    recentOptions.sortBy { it.first }
+    return buildList(catalog.size) {
+        for ((_, candidate) in recentOptions) add(ModelOption(candidate, recent = true))
+        for (candidate in otherOptions) add(ModelOption(candidate, recent = false))
+    }
+}
+
 /**
  * Model ID field that lists the models the selected connection reports: ChatGPT models for a signed-in
- * account, or `GET /models` for an API key. The ID can always be typed, for providers that do not list models.
+ * account, or `GET /models` for an API key. Previously used models are floated to the top.
+ * The ID can always be typed, for providers that do not list models.
  */
 @Composable
 fun ModelField(connection: ApiConnection?, model: String, onChange: (String) -> Unit) {
     val app = LocalContext.current.applicationContext as TouchAiApplication
     val manager = app.chatGptAccounts
     val accounts by manager.accounts.collectAsStateWithLifecycle()
+    val recentModels by app.settingsRepository.recentModels.collectAsStateWithLifecycle(initialValue = emptyList())
     val chatGpt = connection?.authentication == AuthenticationMethod.ChatGpt
-    val account = accounts.firstOrNull { chatGpt && it.id == connection?.chatGptAccountId }
+    val account = accounts.firstOrNull { chatGpt && it.id == connection.chatGptAccountId }
     val endpoint = connection?.endpoint()
+    val endpointKey = endpoint?.recentEndpointKey()
     val latestModel by rememberUpdatedState(model)
     val latestChange by rememberUpdatedState(onChange)
+    val latestRecent by rememberUpdatedState(recentModels)
     var menu by remember { mutableStateOf(false) }
     var models by remember { mutableStateOf<List<AvailableModel>>(emptyList()) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -58,36 +111,59 @@ fun ModelField(connection: ApiConnection?, model: String, onChange: (String) -> 
             models = if (chatGpt) manager.models(account!!.id).map { AvailableModel(it.slug, it.name) }
                 else app.modelCatalog.models(endpoint.baseUrl, endpoint.apiKey, endpoint.protocol)
             if (models.isEmpty()) { message = "No models are listed for this connection."; failed = true }
-            else if (chatGpt && latestModel.isBlank()) latestChange(models.first().id)
+            else if (chatGpt && latestModel.isBlank()) {
+                val preferred = prioritizeModels(models, latestRecent, endpointKey, allowRecentFallback = false)
+                latestChange(preferred.first().model.id)
+            }
         } catch (failure: Exception) {
             if (failure is CancellationException) throw failure
             message = failure.message ?: "Could not load models."; failed = true
         } finally { loading = false }
     }
+    val prioritized = remember(models, recentModels, endpointKey, chatGpt) {
+        prioritizeModels(models, recentModels, endpointKey, allowRecentFallback = !chatGpt)
+    }
     // While typing, narrow the list to matching models; an exact match shows the full list again.
-    val shown = models.takeIf { list -> model.isBlank() || list.any { it.id == model } }
-        ?: models.filter { it.id.contains(model, ignoreCase = true) || it.name.contains(model, ignoreCase = true) }.ifEmpty { models }
+    val shown = prioritized.takeIf { list -> model.isBlank() || list.any { it.model.id == model } }
+        ?: prioritized.filter { it.model.id.contains(model, ignoreCase = true) || it.model.name.contains(model, ignoreCase = true) }
+            .ifEmpty { prioritized }
+    val supporting = message ?: when {
+        models.isNotEmpty() -> "${models.size} models available"
+        prioritized.isNotEmpty() -> "${prioritized.size} recent ${if (prioritized.size == 1) "model" else "models"}"
+        else -> null
+    }
     // Refresh sits inside the field so the box spans the full width like the other fields.
     Box(Modifier.fillMaxWidth()) {
         OutlinedTextField(model, onChange, label = { Text("Model") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
             keyboardOptions = KeyboardOptions(autoCorrectEnabled = false), isError = failed,
-            supportingText = (message ?: models.takeIf { it.isNotEmpty() }?.let { "${it.size} models available" })?.let { text -> { Text(text) } },
+            supportingText = supporting?.let { text -> { Text(text) } },
             trailingIcon = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (loading) Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                     } else if (connection != null) AppIconButton(R.drawable.ic_refresh, "Refresh models", { reload++ })
-                    AppIconButton(R.drawable.ic_expand, "Choose model", { menu = true }, enabled = models.isNotEmpty())
+                    AppIconButton(R.drawable.ic_expand, "Choose model", { menu = true }, enabled = prioritized.isNotEmpty())
                 }
             })
         DropdownMenu(menu, { menu = false }, Modifier.heightIn(max = 360.dp)) {
-            shown.forEach { candidate -> DropdownMenuItem(
-                text = { Column {
-                    Text(candidate.name)
-                    if (candidate.name != candidate.id) Text(candidate.id, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                } },
-                onClick = { menu = false; onChange(candidate.id) })
+            shown.forEach { option ->
+                val candidate = option.model
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(candidate.name)
+                            if (candidate.name != candidate.id) Text(
+                                candidate.id,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    trailingIcon = if (option.recent) {
+                        { Text("Recent", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary) }
+                    } else null,
+                    onClick = { menu = false; onChange(candidate.id) },
+                )
             }
         }
     }

@@ -19,9 +19,16 @@ class OpenAIChatViewModelTest {
     @After fun tearDown() { Dispatchers.resetMain() }
 
     private class Repository(var settings: AppSettings) : SettingsRepository {
+        val recent = mutableListOf<RecentModelEntry>()
         override suspend fun load() = settings
         override suspend fun save(settings: AppSettings) { this.settings = settings }
         override suspend fun rememberPreset(id: String?) { settings = settings.copy(lastPresetId = id) }
+        override suspend fun loadRecentModels() = recent.toList()
+        override suspend fun rememberModel(model: String, endpointKey: String) {
+            val merged = mergeRecentModels(recent, listOf(RecentModelEntry(model, endpointKey)))
+            recent.clear()
+            recent.addAll(merged)
+        }
     }
     private fun client(block: (OpenAIRequest) -> Flow<OpenAIStreamEvent>) = object : ChatClient {
         override fun stream(config: OpenAIModelConfig, request: OpenAIRequest) = block(request)
@@ -593,5 +600,64 @@ class OpenAIChatViewModelTest {
         assertEquals(listOf("first"), vm.uiState.value.historyEntries.map { it.id })
         assertNull(vm.uiState.value.historySnippets["second"])
         assertNotNull(vm.uiState.value.historySnippets["first"])
+    }
+
+    @Test fun viewModelRecordsModelsOnSubmitSaveAndConnectionTestWithoutScramblingUnchangedOrder() = runTest {
+        val repo = Repository(settings)
+        val vm = testChatViewModel(history, repo, client { flow { emit(completed) } })
+        runCurrent()
+
+        // Sending a message records the active model.
+        vm.setPrompt("Hello")
+        vm.submit()
+        advanceUntilIdle()
+        assertEquals(listOf("test"), repo.recent.map { it.model })
+
+        // Saving a newly selected model records it ahead of the older one.
+        vm.saveSettings(settings.copy(api = settings.api.copy(model = "gpt-5.4")))
+        advanceUntilIdle()
+        assertEquals(listOf("gpt-5.4", "test"), repo.recent.map { it.model })
+
+        // Successful connection test records the tested model at the top.
+        vm.testConnection(AiConfiguration(settings.api.copy(model = "o3")), "Default AI")
+        advanceUntilIdle()
+        assertEquals(listOf("o3", "gpt-5.4", "test"), repo.recent.map { it.model })
+
+        // Saving an unrelated setting (imageLimit) must not move unchanged default model ahead of o3.
+        vm.saveSettings(repo.settings.copy(imageLimit = 6))
+        advanceUntilIdle()
+        assertEquals(listOf("o3", "gpt-5.4", "test"), repo.recent.map { it.model })
+    }
+
+    @Test fun effortFallbackNotifiesUserAndAutoSwitchesSettingsAndDraft() = runTest {
+        val repo = Repository(settings.copy(api = settings.api.copy(reasoningEffort = "max")))
+        val vm = testChatViewModel(history, repo, client {
+            flow {
+                emit(OpenAIStreamEvent.EffortAdjusted("max", "xhigh"))
+                emit(OpenAIStreamEvent.TextDelta("Fallback answer"))
+                emit(completed)
+            }
+        })
+        runCurrent()
+
+        vm.setPrompt("Solve hard problem")
+        vm.submit()
+        advanceUntilIdle()
+        assertEquals("xhigh", vm.uiState.value.turns.single().ai.api.reasoningEffort)
+        assertEquals("xhigh", vm.uiState.value.settings.api.reasoningEffort)
+        assertEquals("xhigh", repo.settings.api.reasoningEffort)
+        assertTrue(vm.uiState.value.effortNotice!!.contains("max"))
+        assertTrue(vm.uiState.value.effortNotice!!.contains("xhigh"))
+        vm.consumeEffortNotice()
+        assertNull(vm.uiState.value.effortNotice)
+
+        // Connection test in Settings also updates settingsDraft and surfaces toast notice.
+        vm.showSettings(true)
+        vm.editSettings(vm.uiState.value.settingsDraft!!.copy(api = vm.uiState.value.settingsDraft!!.api.copy(reasoningEffort = "max")))
+        vm.testConnection(vm.uiState.value.settingsDraft!!.resolve(vm.uiState.value.settingsDraft!!.defaultAi), "Default AI")
+        advanceUntilIdle()
+        assertEquals("xhigh", vm.uiState.value.settingsDraft!!.api.reasoningEffort)
+        assertTrue(vm.uiState.value.effortNotice!!.contains("xhigh"))
+        assertTrue(vm.uiState.value.connectionResult!!.contains("max → xhigh"))
     }
 }

@@ -66,6 +66,7 @@ sealed interface OpenAIStreamEvent {
     data class ResponseCheckpoint(val id: String) : OpenAIStreamEvent
     data class RecoveryStatus(val status: String?) : OpenAIStreamEvent
     data class TextSnapshot(val text: String) : OpenAIStreamEvent
+    data class EffortAdjusted(val requested: String, val applied: String?) : OpenAIStreamEvent
 }
 
 data class WebCitation(

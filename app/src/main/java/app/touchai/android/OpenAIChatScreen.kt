@@ -91,6 +91,12 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
             finally { loadingImage = false }
         }
     }
+    LaunchedEffect(state.effortNotice) {
+        state.effortNotice?.let { notice ->
+            Toast.makeText(context, notice, Toast.LENGTH_LONG).show()
+            viewModel.consumeEffortNotice()
+        }
+    }
 
     if (state.logsOpen) {
         RequestLogScreen((context.applicationContext as TouchAiApplication).requestLogs) { viewModel.showLogs(false) }

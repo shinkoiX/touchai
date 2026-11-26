@@ -87,6 +87,7 @@ data class OpenAIChatUiState(
     val savingSettings: Boolean = false,
     val testingConnection: Boolean = false,
     val connectionResult: String? = null,
+    val effortNotice: String? = null,
     val invoking: Boolean = false,
     val capturingScreenshot: Boolean = false,
     val attachments: List<ImageAttachment> = emptyList(),
@@ -123,6 +124,7 @@ class OpenAIChatViewModel(
     init {
         loadSettings()
         viewModelScope.launch { requests.recoveryError.collect { error -> error?.let(::reportError) } }
+        viewModelScope.launch { requests.effortAdjustments.collect(::handleEffortAdjustment) }
     }
 
     fun loadSettings() {
@@ -155,6 +157,7 @@ class OpenAIChatViewModel(
         }
     }
     fun reportError(message: String) = update { it.copy(error = message) }
+    fun consumeEffortNotice() = update { it.copy(effortNotice = null) }
     fun showSettings(open: Boolean) = update { it.copy(settingsOpen = open,
         settingsDraft = if (open) it.settings else null, error = null, connectionResult = null) }
     fun showLogs(open: Boolean) = update { it.copy(logsOpen = open) }
@@ -446,6 +449,7 @@ class OpenAIChatViewModel(
                 repository.save(normalized)
                 val saved = repository.load()
                 val before = _uiState.value
+                recordSavedModels(before.settings, saved)
                 val images = before.attachments.takeLast(saved.imageLimit)
                 cancelRemovedImages(images)
                 update { current ->
@@ -476,8 +480,25 @@ class OpenAIChatViewModel(
         update { it.copy(testingConnection = true, connectionResult = null, error = null) }
         viewModelScope.launch {
             try {
-                client.stream(ai.api, OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Reply with OK only. This is a connection test.")), ai.instructions, RequestPurpose.ConnectionTest, label)).collect { }
-                update { it.copy(connectionResult = "$label: connection and streaming succeeded.") }
+                var adjusted: OpenAIStreamEvent.EffortAdjusted? = null
+                client.stream(ai.api, OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Reply with OK only. This is a connection test.")), ai.instructions, RequestPurpose.ConnectionTest, label)).collect { event ->
+                    if (event is OpenAIStreamEvent.EffortAdjusted) adjusted = event
+                }
+                rememberModelQuietly(ai.api)
+                val fallback = adjusted
+                if (fallback != null) {
+                    val notice = formatEffortAdjustmentNotice(fallback.requested, fallback.applied)
+                    update { current ->
+                        val updatedDraft = current.settingsDraft?.let { draft -> applyEffortToSettings(draft, label, fallback.applied) }
+                        current.copy(
+                            settingsDraft = updatedDraft,
+                            effortNotice = notice,
+                            connectionResult = "$label: connection succeeded (${fallback.requested} → ${fallback.applied ?: "Default"}).",
+                        )
+                    }
+                } else {
+                    update { it.copy(connectionResult = "$label: connection and streaming succeeded.") }
+                }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { reportError("$label: ${error.message}") }
             finally { update { it.copy(testingConnection = false) } }
@@ -499,6 +520,7 @@ class OpenAIChatViewModel(
         clearImageJobs()
         update { it.copy(prompt = "", attachments = emptyList(), croppingImageId = null, error = null,
             turns = it.turns + ChatTurn(user, ai, preset?.name)) }
+        rememberModelQuietly(ai.api)
         startRequest()
     }
 
@@ -518,6 +540,7 @@ class OpenAIChatViewModel(
         val error = apiError(api, requireCredentials = true)
         if (error != null) { reportError(error); return }
         val resume = snapshot.turns.last().status == TurnStatus.Interrupted && snapshot.turns.last().responseId != null && api.recoverResponses
+        rememberModelQuietly(api)
         if (resume) {
             updateLast { it.copy(ai = it.ai.copy(api = api), status = TurnStatus.Recovering, error = null, cancelRequested = false) }
             startRequest(RequestPurpose.Resume)
@@ -562,10 +585,89 @@ class OpenAIChatViewModel(
     private fun rememberedPreset(settings: AppSettings) = settings.lastPresetId?.takeIf { id -> settings.presets.any { it.id == id } }
     private fun presetText(settings: AppSettings, id: String?) = settings.presets.find { it.id == id }?.prompt.orEmpty()
 
+    private fun rememberModelQuietly(api: OpenAIModelConfig) {
+        val model = api.model.trim()
+        if (model.isEmpty()) return
+        val endpointKey = api.recentEndpointKey()
+        viewModelScope.launch {
+            try { repository.rememberModel(model, endpointKey) }
+            catch (error: CancellationException) { throw error }
+            catch (_: Exception) { }
+        }
+    }
+
+    private suspend fun recordSavedModels(before: AppSettings, saved: AppSettings) {
+        try {
+            val existingRecent = repository.loadRecentModels().toSet()
+            val toRecord = ArrayList<RecentModelEntry>()
+            val beforePresets = before.presets.associateBy { it.id }
+            for (preset in saved.presets) {
+                val custom = preset.customAi ?: continue
+                val api = saved.resolve(custom).api
+                val model = api.model.trim()
+                if (model.isEmpty()) continue
+                val entry = RecentModelEntry(model, api.recentEndpointKey())
+                val prevApi = beforePresets[preset.id]?.customAi?.let { before.resolve(it).api }
+                val changed = prevApi?.model?.trim() != model || prevApi.recentEndpointKey() != entry.endpointKey
+                if (changed || entry !in existingRecent) toRecord.add(entry)
+            }
+            val defaultApi = saved.resolve(saved.defaultAi).api
+            val defaultModel = defaultApi.model.trim()
+            if (defaultModel.isNotEmpty()) {
+                val entry = RecentModelEntry(defaultModel, defaultApi.recentEndpointKey())
+                val prevDefaultApi = before.resolve(before.defaultAi).api
+                val changed = prevDefaultApi.model.trim() != defaultModel || prevDefaultApi.recentEndpointKey() != entry.endpointKey
+                if (changed || entry !in existingRecent) toRecord.add(entry)
+            }
+            if (toRecord.isNotEmpty()) repository.rememberModels(toRecord)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (_: Exception) { }
+    }
+
+    private fun handleEffortAdjustment(adjustment: EffortAdjustmentNotice) {
+        val notice = formatEffortAdjustmentNotice(adjustment.requested, adjustment.applied)
+        update { current ->
+            val updatedSettings = applyEffortToActivePreset(current.settings, adjustment.presetId, adjustment.applied)
+            val updatedDraft = current.settingsDraft?.let { draft -> applyEffortToActivePreset(draft, adjustment.presetId, adjustment.applied) }
+            current.copy(settings = updatedSettings, settingsDraft = updatedDraft, effortNotice = notice)
+        }
+        viewModelScope.launch {
+            try {
+                val persisted = applyEffortToActivePreset(repository.load(), adjustment.presetId, adjustment.applied)
+                repository.save(persisted)
+            } catch (error: CancellationException) { throw error }
+            catch (_: Exception) { }
+        }
+    }
+
+    private fun applyEffortToActivePreset(settings: AppSettings, presetId: String?, effort: String?): AppSettings {
+        val targetPreset = presetId?.let { id -> settings.presets.find { it.id == id && it.customAi != null } }
+        return if (targetPreset != null) {
+            settings.copy(presets = settings.presets.map { preset ->
+                if (preset.id == targetPreset.id && preset.customAi != null) {
+                    preset.copy(customAi = preset.customAi.copy(api = preset.customAi.api.copy(reasoningEffort = effort)))
+                } else preset
+            })
+        } else {
+            settings.copy(api = settings.api.copy(reasoningEffort = effort))
+        }
+    }
+
+    private fun applyEffortToSettings(settings: AppSettings, label: String, effort: String?): AppSettings {
+        if (label == "Default AI") return settings.copy(api = settings.api.copy(reasoningEffort = effort))
+        val matched = settings.presets.firstOrNull { it.name == label && it.customAi != null } ?: return settings
+        return applyEffortToActivePreset(settings, matched.id, effort)
+    }
+
     private companion object {
         const val SEARCH_DEBOUNCE_MILLIS = 120L
     }
 }
+
+internal fun formatEffortAdjustmentNotice(requested: String, applied: String?): String =
+    if (applied != null) "Effort \"$requested\" unsupported; switched to \"$applied\""
+    else "Effort \"$requested\" unsupported; switched to Default"
 
 private fun ApiConnection.normalized() = copy(name = name.trim(), baseUrl = baseUrl.trim().trimEnd('/'), apiKey = apiKey.trim())
 
