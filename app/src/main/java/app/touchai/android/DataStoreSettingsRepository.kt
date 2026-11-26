@@ -37,6 +37,7 @@ class DataStoreSettingsRepository(
                 model = prefs[Model] ?: "",
                 protocol = prefs[Protocol]?.let(ApiProtocol::valueOf) ?: defaults.api.protocol,
                 reasoningEffort = prefs[Effort]?.takeIf(String::isNotEmpty),
+                serviceTier = prefs[ServiceTier]?.takeIf(String::isNotEmpty),
                 webSearch = prefs[WebSearch] ?: true,
                 backgroundResponses = prefs[BackgroundResponses] ?: false,
                 authentication = prefs[Authentication]?.let(AuthenticationMethod::valueOf) ?: AuthenticationMethod.ApiKey,
@@ -79,6 +80,7 @@ class DataStoreSettingsRepository(
             prefs[DefaultConnection] = saved.connectionId.orEmpty()
             prefs[Model] = saved.api.model
             prefs[Effort] = saved.api.reasoningEffort ?: ""
+            prefs[ServiceTier] = saved.api.serviceTier ?: ""
             prefs[WebSearch] = saved.api.webSearch
             prefs[BackgroundResponses] = saved.api.backgroundResponses
             prefs[Instructions] = saved.instructions
@@ -174,6 +176,7 @@ class DataStoreSettingsRepository(
         put("connectionId", configuration.connectionId)
         put("model", api.model)
         api.reasoningEffort?.let { put("effort", it) }
+        api.serviceTier?.let { put("serviceTier", it) }
         put("webSearch", api.webSearch)
         put("backgroundResponses", api.backgroundResponses)
         put("instructions", configuration.instructions)
@@ -189,6 +192,7 @@ class DataStoreSettingsRepository(
                 model = value.getValue("model").jsonPrimitive.content,
                 protocol = value["protocol"]?.jsonPrimitive?.content?.let(ApiProtocol::valueOf) ?: legacy.protocol,
                 reasoningEffort = value["effort"]?.jsonPrimitive?.content,
+                serviceTier = value["serviceTier"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotEmpty),
                 webSearch = value.getValue("webSearch").jsonPrimitive.boolean,
                 backgroundResponses = value["backgroundResponses"]?.jsonPrimitive?.boolean ?: false,
                 authentication = value["authentication"]?.jsonPrimitive?.content?.let(AuthenticationMethod::valueOf) ?: AuthenticationMethod.ApiKey,
@@ -225,6 +229,7 @@ class DataStoreSettingsRepository(
         val Model = stringPreferencesKey("model")
         val Protocol = stringPreferencesKey("protocol")
         val Effort = stringPreferencesKey("reasoning_effort")
+        val ServiceTier = stringPreferencesKey("service_tier")
         val WebSearch = booleanPreferencesKey("web_search")
         val BackgroundResponses = booleanPreferencesKey("background_responses")
         val Authentication = stringPreferencesKey("authentication")

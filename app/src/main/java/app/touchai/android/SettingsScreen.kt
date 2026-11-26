@@ -22,8 +22,11 @@ import androidx.compose.ui.unit.dp
 import app.touchai.core.openai.ApiProtocol
 import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.GeminiBaseUrl
+import app.touchai.core.openai.GeminiServiceTiers
 import app.touchai.core.openai.OpenAIModelConfig
+import app.touchai.core.openai.OpenAiServiceTiers
 import app.touchai.core.openai.ReasoningEffortTiers
+import app.touchai.core.openai.wireServiceTier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import java.net.URI
@@ -292,6 +295,10 @@ private fun AiConfigurationEditor(value: AiConfiguration, connections: List<ApiC
         }
         ModelField(connection, value.api.model) { model -> api { it.copy(model = model) } }
         ReasoningEffortEditor(value.api.reasoningEffort) { effort -> api { it.copy(reasoningEffort = effort) } }
+        if (connection?.authentication != AuthenticationMethod.ChatGpt) {
+            val protocol = connection?.protocol ?: value.api.protocol
+            ServiceTierEditor(protocol, value.api.serviceTier) { tier -> api { it.copy(serviceTier = tier) } }
+        }
         OutlinedTextField(value.instructions, { onChange(value.copy(instructions = it)) }, label = { Text("Instructions") }, minLines = 2, modifier = Modifier.fillMaxWidth())
     }
     SwitchRow("Web search", value.api.webSearch, { search -> api { it.copy(webSearch = search) } })
@@ -357,6 +364,35 @@ private fun ReasoningEffortEditor(effort: String?, onChange: (String?) -> Unit) 
             placeholder = { Text("Default (none / minimal / low / medium / high / xhigh / max)") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun ServiceTierEditor(protocol: ApiProtocol, serviceTier: String?, onChange: (String?) -> Unit) {
+    val options = if (protocol == ApiProtocol.Gemini) GeminiServiceTiers else OpenAiServiceTiers
+    val effective = wireServiceTier(protocol, serviceTier)
+    val selectedOption = when {
+        effective in options -> effective
+        protocol != ApiProtocol.Gemini && effective == "priority" -> "fast"
+        else -> null
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text("Service tier", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Choices(
+            options = options,
+            selected = { it == selectedOption },
+            label = { tier ->
+                when (tier) {
+                    null -> "Default"
+                    "flex" -> "Flex"
+                    "fast" -> "Fast"
+                    "priority" -> "Priority"
+                    "ultrafast" -> "Ultra"
+                    else -> tier.replaceFirstChar(Char::uppercase)
+                }
+            },
+            onSelect = onChange,
         )
     }
 }

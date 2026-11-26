@@ -25,6 +25,7 @@ internal fun encodeChatTurn(turn: ChatTurn, encryptedApiKey: String? = null) = b
         val api = turn.ai.api
         encryptedApiKey?.let { put("encryptedApiKey", it) }; put("model", api.model); put("baseUrl", api.baseUrl)
         put("protocol", api.protocol.name); put("reasoningEffort", api.reasoningEffort); put("webSearch", api.webSearch)
+        api.serviceTier?.let { put("serviceTier", it) }
         put("timeoutMillis", api.timeoutMillis); put("instructions", turn.ai.instructions)
         put("backgroundResponses", api.backgroundResponses)
         put("authentication", api.authentication.name)
@@ -42,6 +43,7 @@ internal fun decodeChatTurn(value: JsonObject, apiKey: String): ChatTurn {
         ai = AiConfiguration(OpenAIModelConfig(
             apiKey = apiKey, model = ai.string("model"), baseUrl = ai.string("baseUrl"),
             protocol = ApiProtocol.valueOf(ai.string("protocol")), reasoningEffort = ai.optionalString("reasoningEffort"),
+            serviceTier = ai["serviceTier"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotEmpty),
             webSearch = ai.getValue("webSearch").jsonPrimitive.boolean, timeoutMillis = ai.getValue("timeoutMillis").jsonPrimitive.long,
             backgroundResponses = ai["backgroundResponses"]?.jsonPrimitive?.boolean ?: false,
             authentication = ai["authentication"]?.jsonPrimitive?.content?.let(AuthenticationMethod::valueOf) ?: AuthenticationMethod.ApiKey,

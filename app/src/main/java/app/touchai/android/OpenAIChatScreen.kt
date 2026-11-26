@@ -55,7 +55,9 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.touchai.core.markdown.StreamingMarkdown
+import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.OpenAIImage
+import app.touchai.core.openai.wireServiceTier
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -140,7 +142,9 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                 Text("TouchAI", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 val api = state.selectedAi.api
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(listOfNotNull(api.model.ifBlank { "No model" }, api.reasoningEffort).joinToString(" · "),
+                    val activeTier = if (api.authentication == AuthenticationMethod.ChatGpt) null
+                        else wireServiceTier(api.requestProtocol, api.serviceTier)
+                    Text(listOfNotNull(api.model.ifBlank { "No model" }, api.reasoningEffort, activeTier).joinToString(" · "),
                         style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
                     if (api.webSearch) AppIcon(R.drawable.ic_search, "Web search on", Modifier.padding(start = 4.dp), 14.dp, MaterialTheme.colorScheme.onSurfaceVariant)

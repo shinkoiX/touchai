@@ -660,4 +660,25 @@ class OpenAIChatViewModelTest {
         assertTrue(vm.uiState.value.effortNotice!!.contains("xhigh"))
         assertTrue(vm.uiState.value.connectionResult!!.contains("max → xhigh"))
     }
+
+    @Test fun serviceTierFallbackNotifiesUserAndAutoSwitchesSettings() = runTest {
+        val repo = Repository(settings.copy(api = settings.api.copy(serviceTier = "ultrafast")))
+        val vm = testChatViewModel(history, repo, client {
+            flow {
+                emit(OpenAIStreamEvent.ServiceTierAdjusted("ultrafast", "fast"))
+                emit(OpenAIStreamEvent.TextDelta("Fast answer"))
+                emit(completed)
+            }
+        })
+        runCurrent()
+
+        vm.setPrompt("Quick reply")
+        vm.submit()
+        advanceUntilIdle()
+        assertEquals("fast", vm.uiState.value.turns.single().ai.api.serviceTier)
+        assertEquals("fast", vm.uiState.value.settings.api.serviceTier)
+        assertEquals("fast", repo.settings.api.serviceTier)
+        assertTrue(vm.uiState.value.effortNotice!!.contains("ultrafast"))
+        assertTrue(vm.uiState.value.effortNotice!!.contains("fast"))
+    }
 }

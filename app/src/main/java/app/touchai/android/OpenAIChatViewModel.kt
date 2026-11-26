@@ -125,6 +125,7 @@ class OpenAIChatViewModel(
         loadSettings()
         viewModelScope.launch { requests.recoveryError.collect { error -> error?.let(::reportError) } }
         viewModelScope.launch { requests.effortAdjustments.collect(::handleEffortAdjustment) }
+        viewModelScope.launch { requests.serviceTierAdjustments.collect(::handleServiceTierAdjustment) }
     }
 
     fun loadSettings() {
@@ -480,20 +481,33 @@ class OpenAIChatViewModel(
         update { it.copy(testingConnection = true, connectionResult = null, error = null) }
         viewModelScope.launch {
             try {
-                var adjusted: OpenAIStreamEvent.EffortAdjusted? = null
+                var adjustedEffort: OpenAIStreamEvent.EffortAdjusted? = null
+                var adjustedTier: OpenAIStreamEvent.ServiceTierAdjusted? = null
                 client.stream(ai.api, OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Reply with OK only. This is a connection test.")), ai.instructions, RequestPurpose.ConnectionTest, label)).collect { event ->
-                    if (event is OpenAIStreamEvent.EffortAdjusted) adjusted = event
+                    when (event) {
+                        is OpenAIStreamEvent.EffortAdjusted -> adjustedEffort = event
+                        is OpenAIStreamEvent.ServiceTierAdjusted -> adjustedTier = event
+                        else -> Unit
+                    }
                 }
                 rememberModelQuietly(ai.api)
-                val fallback = adjusted
-                if (fallback != null) {
-                    val notice = formatEffortAdjustmentNotice(fallback.requested, fallback.applied)
+                if (adjustedEffort != null || adjustedTier != null) {
+                    val notices = buildList {
+                        adjustedEffort?.let { add(formatEffortAdjustmentNotice(it.requested, it.applied)) }
+                        adjustedTier?.let { add(formatServiceTierAdjustmentNotice(it.requested, it.applied)) }
+                    }
+                    val details = buildList {
+                        adjustedEffort?.let { add("${it.requested} → ${it.applied ?: "Default"}") }
+                        adjustedTier?.let { add("tier ${it.requested} → ${it.applied ?: "Default"}") }
+                    }
                     update { current ->
-                        val updatedDraft = current.settingsDraft?.let { draft -> applyEffortToSettings(draft, label, fallback.applied) }
+                        var updatedDraft = current.settingsDraft
+                        adjustedEffort?.let { fb -> updatedDraft = updatedDraft?.let { d -> applyApiTransformToSettings(d, label) { it.copy(reasoningEffort = fb.applied) } } }
+                        adjustedTier?.let { fb -> updatedDraft = updatedDraft?.let { d -> applyApiTransformToSettings(d, label) { it.copy(serviceTier = fb.applied) } } }
                         current.copy(
                             settingsDraft = updatedDraft,
-                            effortNotice = notice,
-                            connectionResult = "$label: connection succeeded (${fallback.requested} → ${fallback.applied ?: "Default"}).",
+                            effortNotice = notices.joinToString("\n"),
+                            connectionResult = "$label: connection succeeded (${details.joinToString("; ")}).",
                         )
                     }
                 } else {
@@ -626,38 +640,63 @@ class OpenAIChatViewModel(
     }
 
     private fun handleEffortAdjustment(adjustment: EffortAdjustmentNotice) {
-        val notice = formatEffortAdjustmentNotice(adjustment.requested, adjustment.applied)
+        applyRuntimeApiAdjustment(
+            presetId = adjustment.presetId,
+            notice = formatEffortAdjustmentNotice(adjustment.requested, adjustment.applied),
+        ) { it.copy(reasoningEffort = adjustment.applied) }
+    }
+
+    private fun handleServiceTierAdjustment(adjustment: ServiceTierAdjustmentNotice) {
+        applyRuntimeApiAdjustment(
+            presetId = adjustment.presetId,
+            notice = formatServiceTierAdjustmentNotice(adjustment.requested, adjustment.applied),
+        ) { it.copy(serviceTier = adjustment.applied) }
+    }
+
+    private fun applyRuntimeApiAdjustment(
+        presetId: String?,
+        notice: String,
+        transform: (OpenAIModelConfig) -> OpenAIModelConfig,
+    ) {
         update { current ->
-            val updatedSettings = applyEffortToActivePreset(current.settings, adjustment.presetId, adjustment.applied)
-            val updatedDraft = current.settingsDraft?.let { draft -> applyEffortToActivePreset(draft, adjustment.presetId, adjustment.applied) }
+            val updatedSettings = applyApiTransformToActivePreset(current.settings, presetId, transform)
+            val updatedDraft = current.settingsDraft?.let { draft -> applyApiTransformToActivePreset(draft, presetId, transform) }
             current.copy(settings = updatedSettings, settingsDraft = updatedDraft, effortNotice = notice)
         }
         viewModelScope.launch {
             try {
-                val persisted = applyEffortToActivePreset(repository.load(), adjustment.presetId, adjustment.applied)
+                val persisted = applyApiTransformToActivePreset(repository.load(), presetId, transform)
                 repository.save(persisted)
             } catch (error: CancellationException) { throw error }
             catch (_: Exception) { }
         }
     }
 
-    private fun applyEffortToActivePreset(settings: AppSettings, presetId: String?, effort: String?): AppSettings {
+    private fun applyApiTransformToActivePreset(
+        settings: AppSettings,
+        presetId: String?,
+        transform: (OpenAIModelConfig) -> OpenAIModelConfig,
+    ): AppSettings {
         val targetPreset = presetId?.let { id -> settings.presets.find { it.id == id && it.customAi != null } }
         return if (targetPreset != null) {
             settings.copy(presets = settings.presets.map { preset ->
                 if (preset.id == targetPreset.id && preset.customAi != null) {
-                    preset.copy(customAi = preset.customAi.copy(api = preset.customAi.api.copy(reasoningEffort = effort)))
+                    preset.copy(customAi = preset.customAi.copy(api = transform(preset.customAi.api)))
                 } else preset
             })
         } else {
-            settings.copy(api = settings.api.copy(reasoningEffort = effort))
+            settings.copy(api = transform(settings.api))
         }
     }
 
-    private fun applyEffortToSettings(settings: AppSettings, label: String, effort: String?): AppSettings {
-        if (label == "Default AI") return settings.copy(api = settings.api.copy(reasoningEffort = effort))
+    private fun applyApiTransformToSettings(
+        settings: AppSettings,
+        label: String,
+        transform: (OpenAIModelConfig) -> OpenAIModelConfig,
+    ): AppSettings {
+        if (label == "Default AI") return settings.copy(api = transform(settings.api))
         val matched = settings.presets.firstOrNull { it.name == label && it.customAi != null } ?: return settings
-        return applyEffortToActivePreset(settings, matched.id, effort)
+        return applyApiTransformToActivePreset(settings, matched.id, transform)
     }
 
     private companion object {
@@ -669,10 +708,15 @@ internal fun formatEffortAdjustmentNotice(requested: String, applied: String?): 
     if (applied != null) "Effort \"$requested\" unsupported; switched to \"$applied\""
     else "Effort \"$requested\" unsupported; switched to Default"
 
+internal fun formatServiceTierAdjustmentNotice(requested: String, applied: String?): String =
+    if (applied != null) "Service tier \"$requested\" unsupported; switched to \"$applied\""
+    else "Service tier \"$requested\" unsupported; switched to Default"
+
 private fun ApiConnection.normalized() = copy(name = name.trim(), baseUrl = baseUrl.trim().trimEnd('/'), apiKey = apiKey.trim())
 
 private fun OpenAIModelConfig.normalized() = copy(baseUrl = baseUrl.trim().trimEnd('/'), apiKey = apiKey.trim(), model = model.trim(),
-    reasoningEffort = reasoningEffort?.trim()?.takeIf(String::isNotEmpty))
+    reasoningEffort = reasoningEffort?.trim()?.takeIf(String::isNotEmpty),
+    serviceTier = serviceTier?.trim()?.takeIf(String::isNotEmpty))
 
 internal fun settingsError(settings: AppSettings): String? {
     if (settings.imageLimit !in 1..10) return "Image limit must be between 1 and 10."

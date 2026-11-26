@@ -39,6 +39,7 @@ fun OpenAIModelConfig.using(connection: ApiConnection): OpenAIModelConfig {
     val endpoint = connection.endpoint()
     return copy(authentication = endpoint.authentication, baseUrl = endpoint.baseUrl, protocol = endpoint.protocol,
         apiKey = endpoint.apiKey, chatGptAccountId = endpoint.chatGptAccountId,
+        serviceTier = if (endpoint.authentication == AuthenticationMethod.ChatGpt) null else serviceTier,
         backgroundResponses = backgroundResponses && endpoint.supportsBackgroundResponses)
 }
 

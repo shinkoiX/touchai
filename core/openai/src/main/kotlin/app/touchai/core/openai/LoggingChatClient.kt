@@ -31,6 +31,9 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
             put("authentication", config.authentication.label)
             put("model", config.model)
             config.reasoningEffort?.let { put("reasoningEffort", it) }
+            if (config.authentication != AuthenticationMethod.ChatGpt) {
+                wireServiceTier(config.requestProtocol, config.serviceTier)?.let { put("serviceTier", it) }
+            }
             put("webSearch", config.webSearch)
             put("timeoutMillis", config.timeoutMillis)
             put("backgroundResponses", config.recoverResponses)
@@ -63,6 +66,8 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
         var responseId = request.resumeResponseId
         var adjustedEffort: String? = null
         var effortWasAdjusted = false
+        var adjustedServiceTier: String? = null
+        var serviceTierWasAdjusted = false
         // Finish is non-cancellable so Stop records the partial result as well.
         try {
             logs.started(record.copy(data = redactLogCredentials(record.data, config.apiKey).jsonObject))
@@ -98,6 +103,10 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
                         effortWasAdjusted = true
                         adjustedEffort = event.applied
                     }
+                    is OpenAIStreamEvent.ServiceTierAdjusted -> {
+                        serviceTierWasAdjusted = true
+                        adjustedServiceTier = event.applied
+                    }
                     else -> Unit
                 }
                 emit(event)
@@ -131,6 +140,7 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
                 put("status", status)
                 responseId?.let { put("responseId", it) }
                 if (effortWasAdjusted) put("appliedReasoningEffort", adjustedEffort ?: "default")
+                if (serviceTierWasAdjusted) put("appliedServiceTier", adjustedServiceTier ?: "default")
                 put("durationMillis", elapsed())
                 firstReasoningMillis?.let { put("firstReasoningMillis", it) }
                 firstTextMillis?.let { put("firstTextMillis", it) }

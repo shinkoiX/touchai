@@ -44,39 +44,62 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
 
     private fun createStream(config: OpenAIModelConfig, request: OpenAIRequest, onCheckpoint: (String) -> Unit): Flow<OpenAIStreamEvent> = flow {
         val originalEffort = config.reasoningEffort?.trim()?.takeIf(String::isNotEmpty)
-        var currentConfig = config.copy(reasoningEffort = originalEffort)
+        val originalTier = config.serviceTier?.trim()?.takeIf(String::isNotEmpty)
+        var currentConfig = config.copy(reasoningEffort = originalEffort, serviceTier = originalTier)
         var includeSummary = true
         val triedEfforts = linkedSetOf<String?>(originalEffort?.lowercase())
+        val triedTiers = linkedSetOf<String?>(wireServiceTier(currentConfig.requestProtocol, originalTier))
         var attempts = 0
-        while (attempts < 6) {
+        val maxAttempts = 8
+        while (attempts < maxAttempts) {
             attempts++
             val bodyWithSummary = buildRequestBody(currentConfig, request, includeReasoningSummary = includeSummary)
             val bodyWithoutSummary = buildRequestBody(currentConfig, request, includeReasoningSummary = false)
-            val allowSummaryFallback = includeSummary && bodyWithSummary != bodyWithoutSummary && attempts < 6
+            val allowSummaryFallback = includeSummary && bodyWithSummary != bodyWithoutSummary && attempts < maxAttempts
             var rejectedSummary = false
             var rejectedEffortBody: String? = null
+            var rejectedTierBody: String? = null
             streamWithBody(
                 config = currentConfig,
                 requestBody = bodyWithSummary,
                 allowSummaryFallback = allowSummaryFallback,
-                allowEffortFallback = currentConfig.reasoningEffort != null && attempts < 6,
+                allowEffortFallback = currentConfig.reasoningEffort != null && attempts < maxAttempts,
+                allowServiceTierFallback = currentConfig.authentication != AuthenticationMethod.ChatGpt &&
+                    wireServiceTier(currentConfig.requestProtocol, currentConfig.serviceTier) != null && attempts < maxAttempts,
                 onConnected = {
                     if (originalEffort != null && currentConfig.reasoningEffort != originalEffort) {
                         emit(OpenAIStreamEvent.EffortAdjusted(originalEffort, currentConfig.reasoningEffort))
                     }
+                    if (originalTier != null && wireServiceTier(currentConfig.requestProtocol, currentConfig.serviceTier) !=
+                        wireServiceTier(currentConfig.requestProtocol, originalTier)) {
+                        emit(OpenAIStreamEvent.ServiceTierAdjusted(originalTier, currentConfig.serviceTier))
+                    }
                 },
                 onSummaryRejected = { rejectedSummary = true },
                 onEffortRejected = { rejectedEffortBody = it },
+                onServiceTierRejected = { rejectedTierBody = it },
                 onCheckpoint = onCheckpoint,
             )
             if (rejectedSummary) {
                 includeSummary = false
                 continue
             }
+            val tierError = rejectedTierBody
+            if (tierError != null && originalTier != null) {
+                val decision = nextFallbackServiceTier(currentConfig.requestProtocol, currentConfig.serviceTier, triedTiers)
+                if (decision.shouldRetry && attempts < maxAttempts) {
+                    triedTiers.add(wireServiceTier(currentConfig.requestProtocol, decision.nextTier))
+                    currentConfig = currentConfig.copy(serviceTier = decision.nextTier)
+                    continue
+                }
+                emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(tierError)))
+                val message = errorMessage(tierError)
+                throw OpenAIRequestException(listOfNotNull("HTTP 400", message).joinToString(": "), 400)
+            }
             val effortError = rejectedEffortBody
             if (effortError != null && originalEffort != null) {
                 val decision = nextFallbackEffort(currentConfig.requestProtocol, originalEffort, triedEfforts, effortError)
-                if (decision.shouldRetry && attempts < 6) {
+                if (decision.shouldRetry && attempts < maxAttempts) {
                     triedEfforts.add(decision.nextEffort?.lowercase())
                     currentConfig = currentConfig.copy(reasoningEffort = decision.nextEffort)
                     continue
@@ -94,9 +117,11 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
         requestBody: JsonObject,
         allowSummaryFallback: Boolean,
         allowEffortFallback: Boolean,
+        allowServiceTierFallback: Boolean,
         onConnected: suspend () -> Unit,
         onSummaryRejected: () -> Unit,
         onEffortRejected: (String) -> Unit,
+        onServiceTierRejected: (String) -> Unit,
         onCheckpoint: (String) -> Unit,
     ) {
         var responseId: String? = null
@@ -110,6 +135,10 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
             if (!response.status.isSuccess()) {
                 val body = response.bodyAsText()
                 if (response.status == HttpStatusCode.BadRequest) {
+                    if (allowServiceTierFallback && isServiceTierRejected(config, body)) {
+                        onServiceTierRejected(body)
+                        return@execute
+                    }
                     if (allowEffortFallback && isReasoningEffortRejected(config, body)) {
                         onEffortRejected(body)
                         return@execute
@@ -128,16 +157,29 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                 emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(response.bodyAsText())))
                 throw OpenAIStreamException("The endpoint did not return an event stream. Check the API protocol.")
             }
-            onConnected()
 
             val parser = SseByteParser()
             val channel = response.bodyAsChannel()
             val bytes = ByteArray(8192)
             var completed = false
+            var streamAccepted = false
+            var pendingCheckpoint: String? = null
             var thinkingEmitted = false
             val receivedReasoning = StringBuilder()
             val receivedText = StringBuilder()
             val imageIds = mutableSetOf<String>()
+
+            suspend fun acceptStream() {
+                if (streamAccepted) return
+                streamAccepted = true
+                onConnected()
+                pendingCheckpoint?.let {
+                    onCheckpoint(it)
+                    emit(OpenAIStreamEvent.ResponseCheckpoint(it))
+                    pendingCheckpoint = null
+                }
+            }
+
             streamLoop@ while (!completed) {
                 currentCoroutineContext().ensureActive()
                 val count = channel.readAvailable(bytes, 0, bytes.size)
@@ -150,15 +192,38 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                         emit(OpenAIStreamEvent.ResponsePayload(JsonPrimitive(event.data)))
                         throw error
                     }
+                    val decoded = decodeStreamPayload(config.requestProtocol, payload, event.name)
+                    if (decoded.failure != null && !streamAccepted) {
+                        if (allowServiceTierFallback && isServiceTierRejected(config, event.data)) {
+                            onServiceTierRejected(event.data)
+                            return@execute
+                        }
+                        if (allowEffortFallback && isReasoningEffortRejected(config, event.data)) {
+                            onEffortRejected(event.data)
+                            return@execute
+                        }
+                        if (allowSummaryFallback && isReasoningSummaryRejected(config, event.data)) {
+                            onSummaryRejected()
+                            return@execute
+                        }
+                    }
                     emit(OpenAIStreamEvent.ResponsePayload(payload))
                     if (config.recoverResponses && responseId == null) {
                         checkpointId(config.requestProtocol, payload)?.let {
                             responseId = it
-                            onCheckpoint(it)
-                            emit(OpenAIStreamEvent.ResponseCheckpoint(it))
+                            if (streamAccepted) {
+                                onCheckpoint(it)
+                                emit(OpenAIStreamEvent.ResponseCheckpoint(it))
+                            } else {
+                                pendingCheckpoint = it
+                            }
                         }
                     }
-                    val decoded = decodeStreamPayload(config.requestProtocol, payload, event.name)
+                    val hasVisibleProgress = decoded.thinkingStarted || decoded.reasoningDeltas.isNotEmpty() ||
+                        decoded.finalReasoning != null || decoded.deltas.isNotEmpty() || decoded.finalText != null ||
+                        decoded.images.isNotEmpty() || decoded.imageStatusChanged || decoded.searchStatus != null ||
+                        decoded.citations.isNotEmpty() || decoded.completed != null
+                    if (hasVisibleProgress) acceptStream()
                     if (decoded.thinkingStarted && !thinkingEmitted) {
                         thinkingEmitted = true
                         emit(OpenAIStreamEvent.ThinkingStarted)
@@ -278,7 +343,7 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                 is OpenAIStreamEvent.ThinkingStarted,
                 is OpenAIStreamEvent.SearchStatus, is OpenAIStreamEvent.Citation,
                 is OpenAIStreamEvent.ImageGenerationStatus, is OpenAIStreamEvent.ResponsePayload,
-                is OpenAIStreamEvent.EffortAdjusted -> Unit
+                is OpenAIStreamEvent.EffortAdjusted, is OpenAIStreamEvent.ServiceTierAdjusted -> Unit
                 is OpenAIStreamEvent.ResponseCheckpoint, is OpenAIStreamEvent.RecoveryStatus -> Unit
             }
         }

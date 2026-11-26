@@ -107,14 +107,16 @@ class SettingsPersistenceTest {
             val repository = DataStoreSettingsRepository(PreferenceDataStoreFactory.create(scope = scope) { file }, cipher)
             val shared = ApiConnection("shared", "Provider", baseUrl = "https://provider.example.com/v1",
                 protocol = ApiProtocol.Responses, apiKey = "shared-test-secret")
-            val settings = AppSettings(api = OpenAIModelConfig(model = "default-model", backgroundResponses = true), connectionId = "shared",
+            val settings = AppSettings(api = OpenAIModelConfig(model = "default-model", serviceTier = "fast", backgroundResponses = true), connectionId = "shared",
                 connections = listOf(shared), presets = listOf(
-                    PromptPreset("one", "One", "Explain", AiConfiguration(OpenAIModelConfig(model = "one-model"), "One", "shared")),
+                    PromptPreset("one", "One", "Explain", AiConfiguration(OpenAIModelConfig(model = "one-model", serviceTier = "flex"), "One", "shared")),
                     PromptPreset("two", "Two", "Explain", AiConfiguration(OpenAIModelConfig(model = "two-model", webSearch = false), "Two", "shared"))), lastPresetId = "one")
             repository.save(settings)
             repository.rememberPreset("one")
             val loaded = repository.load()
             assertEquals(settings, loaded)
+            assertEquals("fast", loaded.aiFor(null).api.serviceTier)
+            assertEquals("flex", loaded.aiFor("one").api.serviceTier)
             assertEquals(OpenAIModelConfig(apiKey = "shared-test-secret", model = "two-model", baseUrl = "https://provider.example.com/v1",
                 protocol = ApiProtocol.Responses, webSearch = false), loaded.aiFor("two").api)
             assertTrue(loaded.aiFor(null).api.backgroundResponses)

@@ -15,6 +15,13 @@ data class EffortAdjustmentNotice(
     val applied: String?,
 )
 
+data class ServiceTierAdjustmentNotice(
+    val chatId: String,
+    val presetId: String?,
+    val requested: String,
+    val applied: String?,
+)
+
 class ActiveChatRequest internal constructor(chat: SavedChat) {
     internal val mutableState = MutableStateFlow(chat)
     val state = mutableState.asStateFlow()
@@ -41,6 +48,8 @@ class ChatRequestRunner(
     val recoveryError = mutableError.asStateFlow()
     private val mutableEffortAdjustments = MutableSharedFlow<EffortAdjustmentNotice>(extraBufferCapacity = 8)
     val effortAdjustments = mutableEffortAdjustments.asSharedFlow()
+    private val mutableServiceTierAdjustments = MutableSharedFlow<ServiceTierAdjustmentNotice>(extraBufferCapacity = 8)
+    val serviceTierAdjustments = mutableServiceTierAdjustments.asSharedFlow()
     private val restoreMutex = Mutex()
 
     fun find(chatId: String): ActiveChatRequest? = active.value[chatId]
@@ -143,6 +152,10 @@ class ChatRequestRunner(
                     is OpenAIStreamEvent.EffortAdjusted -> {
                         update(handle) { it.copy(ai = it.ai.copy(api = it.ai.api.copy(reasoningEffort = event.applied))) }
                         mutableEffortAdjustments.tryEmit(EffortAdjustmentNotice(handle.chatId, initial.selectedPreset, event.requested, event.applied))
+                    }
+                    is OpenAIStreamEvent.ServiceTierAdjusted -> {
+                        update(handle) { it.copy(ai = it.ai.copy(api = it.ai.api.copy(serviceTier = event.applied))) }
+                        mutableServiceTierAdjustments.tryEmit(ServiceTierAdjustmentNotice(handle.chatId, initial.selectedPreset, event.requested, event.applied))
                     }
                     is OpenAIStreamEvent.ResponsePayload -> Unit
                 }

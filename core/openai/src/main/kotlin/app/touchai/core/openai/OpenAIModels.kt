@@ -21,6 +21,7 @@ data class OpenAIModelConfig(
     val baseUrl: String = "https://api.openai.com/v1",
     val protocol: ApiProtocol = ApiProtocol.ChatCompletions,
     val reasoningEffort: String? = null,
+    val serviceTier: String? = null,
     val webSearch: Boolean = true,
     val timeoutMillis: Long = 120_000L,
     val backgroundResponses: Boolean = false,
@@ -67,6 +68,7 @@ sealed interface OpenAIStreamEvent {
     data class RecoveryStatus(val status: String?) : OpenAIStreamEvent
     data class TextSnapshot(val text: String) : OpenAIStreamEvent
     data class EffortAdjusted(val requested: String, val applied: String?) : OpenAIStreamEvent
+    data class ServiceTierAdjusted(val requested: String, val applied: String?) : OpenAIStreamEvent
 }
 
 data class WebCitation(
@@ -145,6 +147,9 @@ fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest, includeR
                 }) }
             }
             config.reasoningEffort?.let { put("reasoning_effort", it) }
+            if (config.authentication != AuthenticationMethod.ChatGpt) {
+                wireServiceTier(ApiProtocol.ChatCompletions, config.serviceTier)?.let { put("service_tier", it) }
+            }
             if (config.webSearch) putJsonObject("web_search_options") { }
         }
         ApiProtocol.Responses -> {
@@ -180,6 +185,9 @@ fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest, includeR
                     if (requestSummary) put("summary", "auto")
                 }
             }
+            if (config.authentication != AuthenticationMethod.ChatGpt) {
+                wireServiceTier(ApiProtocol.Responses, config.serviceTier)?.let { put("service_tier", it) }
+            }
             if (config.webSearch) putJsonArray("tools") { add(buildJsonObject { put("type", "web_search") }) }
         }
         ApiProtocol.Gemini -> {
@@ -206,6 +214,7 @@ fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest, includeR
                     if (requestSummary) put("thinking_summaries", "auto")
                 }
             }
+            wireServiceTier(ApiProtocol.Gemini, config.serviceTier)?.let { put("service_tier", it) }
             if (config.webSearch) putJsonArray("tools") { add(buildJsonObject { put("type", "google_search") }) }
         }
     }
