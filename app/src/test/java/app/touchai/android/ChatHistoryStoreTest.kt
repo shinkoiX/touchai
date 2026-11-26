@@ -207,4 +207,76 @@ class ChatHistoryStoreTest {
         val matchPos = snippet.indexOf("记录")
         assertTrue("Match must appear near the start of snippet (pos=$matchPos): $snippet", matchPos in 1..15)
     }
+
+    @Test fun branchedTreePersistsAllVersionsWithoutDuplicatingLatestImagesAndSearchesOnlyLatestVersion() = runBlocking {
+        val directory = temporaryFolder.newFolder()
+        val store = ChatHistoryStore(directory, cipher)
+        val v1Root = turn.copy(
+            user = ChatMessage(MessageRole.User, "Compare versions"),
+            answer = "Obsolete first-branch answer",
+            reasoning = "Old branch reasoning",
+            generatedImages = emptyList(),
+        )
+        val v1Child = v1Root.copy(
+            user = ChatMessage(MessageRole.User, "Old branch follow-up"),
+            answer = "Obsolete subtree reply",
+            reasoning = "",
+        )
+        val v2Root = turn.copy(
+            user = ChatMessage(MessageRole.User, "Compare versions"),
+            answer = "Fresh latest-branch answer",
+            reasoning = "Latest branch reasoning",
+        )
+        val v2Child = v2Root.copy(
+            user = ChatMessage(MessageRole.User, "Latest branch follow-up"),
+            answer = "Latest subtree reply",
+            reasoning = "",
+            generatedImages = emptyList(),
+        )
+        val tree = ChatTree()
+            .appendTurn(v1Root, now = 100L)
+            .appendTurn(v1Child, now = 200L)
+            .let { t -> t.branchRetry(t.activePath().first().id, v2Root, now = 300L) }
+            .appendTurn(v2Child, now = 400L)
+        val chat = SavedChat("branched", 400L, "explain", tree.activeTurns(), tree)
+        store.save(chat)
+
+        // Ensure base64 image data on the latest path is stored once via turnIndex, not duplicated.
+        val rawJsonl = directory.resolve("branched.jsonl").readText()
+        assertFalse(rawJsonl.contains("history-secret"))
+        val markerCount = Regex("data:image/png;base64,BBBB").findAll(rawJsonl).count()
+        assertEquals("Generated image on latest path must not be duplicated in tree", 1, markerCount)
+
+        // Warm search indexes ONLY the latest version.
+        assertEquals(listOf("branched"), store.search("Fresh latest-branch").map { it.entry.id })
+        assertEquals(listOf("branched"), store.search("Latest subtree").map { it.entry.id })
+        assertTrue(store.search("Obsolete first-branch").isEmpty())
+        assertTrue(store.search("Obsolete subtree").isEmpty())
+
+        // Cold backfill (streaming JSON scanner with no search.index) also indexes ONLY the latest version.
+        assertTrue(directory.resolve("search.index").delete())
+        val reopened = ChatHistoryStore(directory, cipher)
+        assertEquals(listOf("branched"), reopened.search("Fresh latest-branch").map { it.entry.id })
+        assertTrue(reopened.search("Obsolete first-branch").isEmpty())
+
+        // Full tree survives reload with both branches intact.
+        val loaded = reopened.load("branched")
+        assertNotNull(loaded.tree)
+        assertEquals(4, loaded.tree!!.nodes.size)
+        val rootSiblings = loaded.tree!!.siblingsOf(loaded.tree!!.activePath().first().id)
+        assertEquals(2, rootSiblings.size)
+        val switched = loaded.tree!!.selectBranch(rootSiblings.first().id)
+        assertEquals(listOf("Obsolete first-branch answer", "Obsolete subtree reply"), switched.activeTurns().map { it.answer })
+
+        // Export & import preserve the full tree and strip plaintext keys across all branches.
+        val exported = java.io.ByteArrayOutputStream()
+        ChatHistoryArchive(reopened).exportTo(exported)
+        assertFalse(exported.toString(Charsets.UTF_8).contains("history-secret"))
+        val importedStore = ChatHistoryStore(temporaryFolder.newFolder(), cipher)
+        val importedCount = ChatHistoryArchive(importedStore).importFrom(exported.toByteArray().inputStream()) { }
+        assertEquals(1, importedCount)
+        val importedChat = importedStore.load(importedStore.list().single().id)
+        assertEquals(4, importedChat.tree!!.nodes.size)
+        assertEquals(listOf("Fresh latest-branch answer", "Latest subtree reply"), importedChat.latestTurns.map { it.answer })
+    }
 }

@@ -65,6 +65,87 @@ internal fun decodeChatTurn(value: JsonObject, apiKey: String): ChatTurn {
     )
 }
 
+internal data class DecodedChatBody(
+    val selectedPreset: String?,
+    val turns: List<ChatTurn>,
+    val tree: ChatTree?,
+)
+
+/**
+ * Encodes chat turns and optional branch tree.
+ * Top-level `turns` always stores the latest version so history search (and legacy readers)
+ * automatically see only the latest version. Nodes on the latest path reference `turnIndex`
+ * to avoid duplicating large base64 attachments.
+ */
+internal fun encodeChatBody(
+    selectedPreset: String?,
+    turns: List<ChatTurn>,
+    tree: ChatTree?,
+    encryptApiKey: (ChatTurn) -> String?,
+): JsonObject = buildJsonObject {
+    put("selectedPreset", selectedPreset)
+    val branchedTree = tree?.takeIf { it.hasBranches }
+    val latestPath = branchedTree?.latestPath()
+    val latestTurns = latestPath?.map { it.turn } ?: turns
+    putJsonArray("turns") { latestTurns.forEach { add(encodeChatTurn(it, encryptApiKey(it))) } }
+    if (branchedTree != null && latestPath != null) {
+        val latestIndexById = latestPath.mapIndexed { index, node -> node.id to index }.toMap()
+        putJsonObject("tree") {
+            branchedTree.activeLeafId?.let { put("activeLeafId", it) }
+            putJsonArray("nodes") {
+                branchedTree.nodes.forEach { node ->
+                    add(buildJsonObject {
+                        put("id", node.id)
+                        put("parentId", node.parentId)
+                        put("createdAt", node.createdAt)
+                        val latestIdx = latestIndexById[node.id]
+                        if (latestIdx != null) {
+                            put("turnIndex", latestIdx)
+                        } else {
+                            put("turn", encodeChatTurn(node.turn, encryptApiKey(node.turn)))
+                        }
+                    })
+                }
+            }
+        }
+    }
+}
+
+internal fun decodeChatBody(
+    body: JsonObject,
+    decryptApiKey: (JsonObject) -> String,
+): DecodedChatBody {
+    val selectedPreset = body.optionalString("selectedPreset")
+    val latestTurns = body.getValue("turns").jsonArray.map { item ->
+        val obj = item.jsonObject
+        decodeChatTurn(obj, decryptApiKey(obj))
+    }
+    val treeObj = body["tree"] as? JsonObject
+    if (treeObj != null) {
+        val nodes = treeObj.getValue("nodes").jsonArray.map { item ->
+            val obj = item.jsonObject
+            val turnIndex = obj["turnIndex"]?.jsonPrimitive?.intOrNull
+            val turn = if (turnIndex != null) {
+                latestTurns[turnIndex]
+            } else {
+                val turnJson = obj.getValue("turn").jsonObject
+                decodeChatTurn(turnJson, decryptApiKey(turnJson))
+            }
+            ChatTreeNode(
+                id = obj.string("id"),
+                parentId = obj["parentId"]?.jsonPrimitive?.contentOrNull,
+                turn = turn,
+                createdAt = obj["createdAt"]?.jsonPrimitive?.longOrNull ?: 0L,
+            )
+        }
+        val activeLeafId = treeObj["activeLeafId"]?.jsonPrimitive?.contentOrNull
+        val tree = ChatTree(nodes, activeLeafId)
+        val activeTurns = tree.activeTurns().takeIf { it.isNotEmpty() } ?: latestTurns
+        return DecodedChatBody(selectedPreset, activeTurns, tree.takeIf { it.hasBranches })
+    }
+    return DecodedChatBody(selectedPreset, latestTurns, null)
+}
+
 
 private fun JsonObject.string(key: String) = getValue(key).jsonPrimitive.content
 private fun JsonObject.optionalString(key: String) = getValue(key).jsonPrimitive.contentOrNull

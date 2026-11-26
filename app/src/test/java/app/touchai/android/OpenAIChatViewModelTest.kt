@@ -681,4 +681,124 @@ class OpenAIChatViewModelTest {
         assertTrue(vm.uiState.value.effortNotice!!.contains("ultrafast"))
         assertTrue(vm.uiState.value.effortNotice!!.contains("fast"))
     }
+
+    @Test fun temporarySwitchAppliesWithoutMutatingSettingsAndRetryCanSwitchModelEffortAndTier() = runTest {
+        val openAi = ApiConnection("openai", "OpenAI", baseUrl = "https://api.openai.com/v1", protocol = ApiProtocol.Responses, apiKey = "openai-key")
+        val gemini = ApiConnection("gemini", "Gemini", baseUrl = GeminiBaseUrl, protocol = ApiProtocol.Gemini, apiKey = "gemini-key")
+        val configured = settings.copy(
+            connectionId = openAi.id,
+            connections = listOf(openAi, gemini),
+            api = OpenAIModelConfig(model = "gpt-6.1-terra", reasoningEffort = "low"),
+        )
+        val repo = Repository(configured)
+        val usedConfigs = mutableListOf<OpenAIModelConfig>()
+        val vm = testChatViewModel(history, repo, client {
+            flow { emit(OpenAIStreamEvent.TextDelta("Reply")); emit(completed) }
+        })
+        // Capture actual OpenAIModelConfig passed to ChatClient.
+        val capturingVm = testChatViewModel(history, repo, object : ChatClient {
+            override fun stream(config: OpenAIModelConfig, request: OpenAIRequest) = flow {
+                usedConfigs += config
+                emit(OpenAIStreamEvent.TextDelta("Reply from ${config.model}"))
+                emit(completed)
+            }
+        })
+        runCurrent()
+
+        // Temporary switch changes active request without altering saved settings.
+        val tempOpenAi = capturingVm.uiState.value.selectedAi.copy(
+            api = capturingVm.uiState.value.selectedAi.api.copy(model = "gpt-6.2-sol", reasoningEffort = "xhigh", serviceTier = "ultrafast"),
+        )
+        capturingVm.setTemporaryAi(tempOpenAi)
+        assertTrue(capturingVm.uiState.value.hasTemporaryAi)
+        assertEquals("gpt-6.1-terra", repo.settings.api.model)
+        capturingVm.setPrompt("Explain quantum tunneling")
+        capturingVm.submit()
+        advanceUntilIdle()
+        assertEquals("gpt-6.2-sol", usedConfigs.last().model)
+        assertEquals("xhigh", usedConfigs.last().reasoningEffort)
+        assertEquals("ultrafast", usedConfigs.last().serviceTier)
+        assertEquals("gpt-6.1-terra", repo.settings.api.model)
+
+        // Retry with switched connection, model, effort, and service tier.
+        val retryGemini = AiConfiguration(
+            api = OpenAIModelConfig(model = "gemini-4-hydrogen", reasoningEffort = "high", serviceTier = "priority"),
+            instructions = "",
+            connectionId = gemini.id,
+        )
+        capturingVm.retry(retryGemini)
+        advanceUntilIdle()
+        assertEquals("gemini-4-hydrogen", usedConfigs.last().model)
+        assertEquals(ApiProtocol.Gemini, usedConfigs.last().protocol)
+        assertEquals("gemini-key", usedConfigs.last().apiKey)
+        assertEquals("high", usedConfigs.last().reasoningEffort)
+        assertEquals("priority", usedConfigs.last().serviceTier)
+        assertEquals("gemini-4-hydrogen", capturingVm.uiState.value.turns.last().ai.api.model)
+        assertEquals("high", capturingVm.uiState.value.turns.last().ai.api.reasoningEffort)
+        assertEquals("gpt-6.1-terra", repo.settings.api.model)
+
+        // New chat clears temporary override back to saved default settings.
+        capturingVm.newChat()
+        advanceUntilIdle()
+        assertFalse(capturingVm.uiState.value.hasTemporaryAi)
+        assertEquals("gpt-6.1-terra", capturingVm.uiState.value.selectedAi.api.model)
+        assertNotNull(vm)
+    }
+
+    @Test fun retryCreatesTreeBranchAllowsViewingPreviousRepliesAndFollowUpContinuesActiveBranch() = runTest {
+        val requests = mutableListOf<OpenAIRequest>()
+        val replies = ArrayDeque(listOf("Answer v1", "Follow-up under v1", "Answer v2", "Follow-up under v2"))
+        val api = client { req ->
+            requests += req
+            val next = replies.removeFirst()
+            flow {
+                emit(OpenAIStreamEvent.TextDelta(next))
+                emit(completed)
+            }
+        }
+        val repo = Repository(settings)
+        val vm = testChatViewModel(history, repo, api)
+        runCurrent()
+
+        vm.setPrompt("Question 1")
+        vm.submit()
+        advanceUntilIdle()
+        vm.setPrompt("Question 2")
+        vm.submit()
+        advanceUntilIdle()
+        assertEquals(listOf("Answer v1", "Follow-up under v1"), vm.uiState.value.turns.map { it.answer })
+
+        // Retry Turn 0 (Question 1) -> creates branch 2/2 while keeping v1 + its follow-up intact.
+        vm.retry(turnIndex = 0)
+        advanceUntilIdle()
+        assertEquals(listOf("Answer v2"), vm.uiState.value.turns.map { it.answer })
+        assertEquals(BranchInfo(vm.uiState.value.chatTree.activePath().first().id, 1, 2), vm.uiState.value.branchInfo(0))
+
+        // Switch back to branch 1/2 -> shows Answer v1 AND its follow-up subtree.
+        vm.switchBranch(0, -1)
+        assertEquals(listOf("Answer v1", "Follow-up under v1"), vm.uiState.value.turns.map { it.answer })
+        assertEquals(0, vm.uiState.value.branchInfo(0)!!.index)
+
+        // Switch forward to branch 2/2 and send a new follow-up -> context uses v2, not v1.
+        vm.switchBranch(0, +1)
+        vm.setPrompt("Question 3")
+        vm.submit()
+        advanceUntilIdle()
+        assertEquals(listOf("Question 1", "Answer v2", "Question 3"), requests.last().messages.map { it.text })
+        assertEquals(listOf("Answer v2", "Follow-up under v2"), vm.uiState.value.turns.map { it.answer })
+
+        // History search finds only the latest version (v2), not the superseded v1 branch.
+        assertEquals(1, history.search("Answer v2").size)
+        assertTrue(history.search("Answer v1").isEmpty())
+
+        // Reopening the saved chat opens on the latest version while still allowing switching to v1.
+        val chatId = vm.uiState.value.chatId
+        val reopened = testChatViewModel(history, repo, api)
+        runCurrent()
+        reopened.openChat(chatId)
+        advanceUntilIdle()
+        assertEquals(listOf("Answer v2", "Follow-up under v2"), reopened.uiState.value.turns.map { it.answer })
+        reopened.switchBranch(0, -1)
+        assertEquals(listOf("Answer v1", "Follow-up under v1"), reopened.uiState.value.turns.map { it.answer })
+    }
 }

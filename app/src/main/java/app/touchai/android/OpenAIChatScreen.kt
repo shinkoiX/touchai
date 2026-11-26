@@ -134,20 +134,40 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
     }
     val openSettings = { viewModel.loadSettings(); viewModel.showSettings(true) }
     val send = { followOutput = true; keyboard?.hide(); viewModel.submit() }
+    var switcherOpen by remember { mutableStateOf(false) }
+    var retrySwitchTarget by remember { mutableStateOf<Pair<Int, AiConfiguration>?>(null) }
 
     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).imePadding()) {
         if (!compactKeyboard) Row(Modifier.fillMaxWidth().heightIn(min = 64.dp).padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
             BrandMark()
-            Column(Modifier.weight(1f).padding(start = 12.dp)) {
+            val api = state.selectedAi.api
+            val activeTier = if (api.authentication == AuthenticationMethod.ChatGpt) null
+                else wireServiceTier(api.requestProtocol, api.serviceTier)
+            Column(
+                Modifier
+                    .weight(1f)
+                    .padding(start = 8.dp)
+                    .clip(MaterialTheme.shapes.medium)
+                    .clickable(enabled = state.ready && !state.isStreaming) { keyboard?.hide(); switcherOpen = true }
+                    .padding(horizontal = 4.dp, vertical = 4.dp),
+            ) {
                 Text("TouchAI", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                val api = state.selectedAi.api
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    val activeTier = if (api.authentication == AuthenticationMethod.ChatGpt) null
-                        else wireServiceTier(api.requestProtocol, api.serviceTier)
-                    Text(listOfNotNull(api.model.ifBlank { "No model" }, api.reasoningEffort, activeTier).joinToString(" · "),
-                        style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                    if (api.webSearch) AppIcon(R.drawable.ic_search, "Web search on", Modifier.padding(start = 4.dp), 14.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        listOfNotNull(api.model.ifBlank { "No model" }, api.reasoningEffort, activeTier).joinToString(" · "),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (state.hasTemporaryAi) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    if (api.webSearch) AppIcon(R.drawable.ic_search, "Web search on", Modifier.padding(start = 2.dp), 14.dp, MaterialTheme.colorScheme.onSurfaceVariant)
+                    if (state.ready && !state.isStreaming) AppIcon(
+                        R.drawable.ic_expand,
+                        "Switch model",
+                        size = 16.dp,
+                        tint = if (state.hasTemporaryAi) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
             AppIconButton(R.drawable.ic_add, "New chat", viewModel::newChat, enabled = !state.preparingImages && !loadingImage && !state.capturingScreenshot)
@@ -168,8 +188,19 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                 else -> Column(Modifier.fillMaxSize().verticalScroll(scrollState).padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalArrangement = Arrangement.spacedBy(20.dp)) {
                     state.turns.forEachIndexed { index, turn ->
+                        val branch = state.branchInfo(index)
                         UserMessage(turn)
-                        AssistantMessage(turn, canRetry = index == state.turns.lastIndex && !state.isStreaming, onRetry = viewModel::retry)
+                        AssistantMessage(
+                            turn = turn,
+                            canRetry = !state.isStreaming,
+                            onRetry = { viewModel.retry(turnIndex = index) },
+                            onRetryWithSwitch = { keyboard?.hide(); retrySwitchTarget = index to turn.ai },
+                            branchIndex = branch?.index ?: 0,
+                            branchCount = branch?.count ?: 1,
+                            canSwitchBranch = !state.isStreaming,
+                            onPreviousBranch = { viewModel.switchBranch(index, -1) },
+                            onNextBranch = { viewModel.switchBranch(index, 1) },
+                        )
                     }
                     val images = state.attachments.filter { it.preview != null }
                     val sendingSequence = state.sendingImages.mapIndexed { index, image -> image.id to index + 1 }.toMap()
@@ -237,6 +268,31 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                 }
             }
         }
+    }
+    if (switcherOpen) {
+        QuickAiSwitcherSheet(
+            title = "Switch model",
+            confirmLabel = "Done",
+            connections = state.settings.connections,
+            initial = state.selectedAi,
+            canReset = state.hasTemporaryAi,
+            liveUpdate = true,
+            onApply = viewModel::setTemporaryAi,
+            onReset = viewModel::clearTemporaryAi,
+            onDismiss = { switcherOpen = false },
+        )
+    }
+    retrySwitchTarget?.let { (turnIndex, targetAi) ->
+        QuickAiSwitcherSheet(
+            title = "Retry with…",
+            confirmLabel = "Retry",
+            connections = state.settings.connections,
+            initial = targetAi,
+            canReset = false,
+            liveUpdate = false,
+            onApply = { updated -> viewModel.retry(updated, turnIndex = turnIndex) },
+            onDismiss = { retrySwitchTarget = null },
+        )
     }
 }
 
@@ -345,17 +401,51 @@ private fun SentImage(image: OpenAIImage, description: String = "Attached image"
 }
 
 @Composable
-private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> Unit) {
+private fun AssistantMessage(
+    turn: ChatTurn,
+    canRetry: Boolean,
+    onRetry: () -> Unit,
+    onRetryWithSwitch: () -> Unit,
+    branchIndex: Int,
+    branchCount: Int,
+    canSwitchBranch: Boolean,
+    onPreviousBranch: () -> Unit,
+    onNextBranch: () -> Unit,
+) {
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
     val activelyThinking = turn.isRunning && turn.answer.isEmpty() && turn.generatedImages.isEmpty() &&
         (turn.isThinking || turn.reasoning.isNotEmpty())
+    val turnTier = if (turn.ai.api.authentication == AuthenticationMethod.ChatGpt) null
+        else wireServiceTier(turn.ai.api.requestProtocol, turn.ai.api.serviceTier)
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             BrandMark(22.dp)
-            Text(turn.ai.api.model, style = MaterialTheme.typography.labelMedium, color = muted, modifier = Modifier.padding(start = 8.dp),
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                turn.ai.api.model,
+                style = MaterialTheme.typography.labelMedium,
+                color = muted,
+                modifier = Modifier.padding(start = 2.dp).weight(1f, fill = false),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            ReplyMetaPill(
+                text = turn.ai.api.reasoningEffort ?: "default",
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                contentColor = muted,
+            )
+            turnTier?.let { tier ->
+                ReplyMetaPill(
+                    text = tier,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+            }
         }
         turn.searchStatus?.let {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -392,12 +482,50 @@ private fun AssistantMessage(turn: ChatTurn, canRetry: Boolean, onRetry: () -> U
         if (turn.status == TurnStatus.Stopped) Text("Stopped", style = MaterialTheme.typography.labelMedium, color = muted)
         turn.error?.let { MessageBanner(it, error = true) }
         val copyText = turn.answer.ifEmpty { turn.reasoning }
-        if (copyText.isNotEmpty() || canRetry) Row(Modifier.offset(x = (-12).dp)) {
+        if (copyText.isNotEmpty() || canRetry || branchCount > 1) Row(Modifier.offset(x = (-12).dp), verticalAlignment = Alignment.CenterVertically) {
             if (copyText.isNotEmpty()) IconButton(onClick = {
                 context.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText("AI response", copyText))
             }) { AppIcon(R.drawable.ic_copy, "Copy", size = 18.dp, tint = muted) }
-            if (canRetry) IconButton(onClick = onRetry) { AppIcon(R.drawable.ic_refresh, "Retry", size = 18.dp, tint = muted) }
+            if (canRetry) {
+                IconButton(onClick = onRetry) { AppIcon(R.drawable.ic_refresh, "Retry", size = 18.dp, tint = muted) }
+                IconButton(onClick = onRetryWithSwitch) { AppIcon(R.drawable.ic_tune, "Switch model and retry", size = 18.dp, tint = muted) }
+            }
+            if (branchCount > 1) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(
+                        onClick = onPreviousBranch,
+                        enabled = canSwitchBranch && branchIndex > 0,
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        AppIcon(R.drawable.ic_chevron_right, "Previous reply", Modifier.rotate(180f), size = 18.dp, tint = muted)
+                    }
+                    Text(
+                        "${branchIndex + 1}/$branchCount",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = muted,
+                    )
+                    IconButton(
+                        onClick = onNextBranch,
+                        enabled = canSwitchBranch && branchIndex < branchCount - 1,
+                        modifier = Modifier.size(32.dp),
+                    ) {
+                        AppIcon(R.drawable.ic_chevron_right, "Next reply", size = 18.dp, tint = muted)
+                    }
+                }
+            }
         }
+    }
+}
+
+@Composable
+private fun ReplyMetaPill(text: String, containerColor: Color, contentColor: Color) {
+    Surface(color = containerColor, contentColor = contentColor, shape = CircleShape) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            modifier = Modifier.padding(horizontal = 7.dp, vertical = 2.dp),
+        )
     }
 }
 

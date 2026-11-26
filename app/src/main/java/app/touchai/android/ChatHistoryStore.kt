@@ -12,9 +12,35 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.*
 
 data class ChatHistoryEntry(val id: String, val title: String, val updatedAt: Long, val turnCount: Int, val pending: Boolean = false)
-data class SavedChat(val id: String, val updatedAt: Long, val selectedPreset: String?, val turns: List<ChatTurn>) {
-    val entry: ChatHistoryEntry get() = ChatHistoryEntry(id,
-        turns.first().user.text.replace(Regex("\\s+"), " ").trim().take(80).ifEmpty { "Image chat" }, updatedAt, turns.size, turns.last().isRunning)
+data class SavedChat(
+    val id: String,
+    val updatedAt: Long,
+    val selectedPreset: String?,
+    val turns: List<ChatTurn>,
+    val tree: ChatTree? = null,
+) {
+    val resolvedTree: ChatTree get() = tree ?: ChatTree.fromLinear(turns)
+    val latestTurns: List<ChatTurn> get() = tree?.latestTurns()?.takeIf { it.isNotEmpty() } ?: turns
+    val entry: ChatHistoryEntry
+        get() {
+            val latest = latestTurns
+            return ChatHistoryEntry(
+                id = id,
+                title = latest.first().user.text.replace(Regex("\\s+"), " ").trim().take(80).ifEmpty { "Image chat" },
+                updatedAt = updatedAt,
+                turnCount = latest.size,
+                pending = turns.lastOrNull()?.isRunning == true || latest.last().isRunning,
+            )
+        }
+
+    fun updateActiveLeaf(updatedAt: Long, transform: (ChatTurn) -> ChatTurn): SavedChat {
+        val currentTree = tree
+        if (currentTree != null) {
+            val updatedTree = currentTree.updateActiveLeaf(transform)
+            return copy(updatedAt = updatedAt, turns = updatedTree.activeTurns(), tree = updatedTree.takeIf { it.hasBranches })
+        }
+        return copy(updatedAt = updatedAt, turns = turns.dropLast(1) + transform(turns.last()))
+    }
 }
 
 interface ChatHistoryRepository {
@@ -38,9 +64,8 @@ class ChatHistoryStore(private val directory: File, private val cipher: ApiKeyCi
             put("id", entry.id); put("title", entry.title); put("updatedAt", entry.updatedAt); put("turnCount", entry.turnCount)
             put("pending", entry.pending)
         }
-        val body = buildJsonObject {
-            put("selectedPreset", chat.selectedPreset)
-            putJsonArray("turns") { chat.turns.forEach { add(encodeChatTurn(it, cipher.encrypt(it.ai.api.apiKey))) } }
+        val body = encodeChatBody(chat.selectedPreset, chat.turns, chat.tree) { turn ->
+            cipher.encrypt(turn.ai.api.apiKey)
         }
         // Keep the small list entry on its own line so browsing history never loads image data.
         // One atomic replacement publishes the metadata, messages, and attachments together.
@@ -72,8 +97,10 @@ class ChatHistoryStore(private val directory: File, private val cipher: ApiKeyCi
         file(id).bufferedReader().use { reader ->
             val header = Json.parseToJsonElement(reader.readLine()).jsonObject
             val body = Json.parseToJsonElement(reader.readText()).jsonObject
-            SavedChat(id, header.getValue("updatedAt").jsonPrimitive.long, body.optionalString("selectedPreset"),
-                body.getValue("turns").jsonArray.map { decodeChatTurn(it.jsonObject, cipher.decrypt(it.jsonObject.getValue("ai").jsonObject.string("encryptedApiKey"))) })
+            val decoded = decodeChatBody(body) { turnObj ->
+                cipher.decrypt(turnObj.getValue("ai").jsonObject.string("encryptedApiKey"))
+            }
+            SavedChat(id, header.getValue("updatedAt").jsonPrimitive.long, decoded.selectedPreset, decoded.turns, decoded.tree)
         }
     }
 

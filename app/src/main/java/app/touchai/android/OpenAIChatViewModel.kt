@@ -69,6 +69,8 @@ private fun List<ImageAttachment>.withScreenshotAttachment(attached: Boolean): L
     }
 }
 
+data class BranchInfo(val nodeId: String, val index: Int, val count: Int)
+
 data class OpenAIChatUiState(
     val settings: AppSettings = AppSettings(),
     val ready: Boolean = false,
@@ -94,14 +96,25 @@ data class OpenAIChatUiState(
     val croppingImageId: String? = null,
     val prompt: String = "",
     val selectedPreset: String? = null,
+    val temporaryAi: AiConfiguration? = null,
+    val chatTree: ChatTree = ChatTree(),
     val turns: List<ChatTurn> = emptyList(),
     val error: String? = null,
 ) {
     val isStreaming: Boolean get() = turns.lastOrNull()?.isRunning == true
-    val selectedAi: AiConfiguration get() = settings.aiFor(selectedPreset)
+    val selectedAi: AiConfiguration get() = temporaryAi?.let(settings::resolve) ?: settings.aiFor(selectedPreset)
+    val hasTemporaryAi: Boolean get() = temporaryAi != null
     val sendingImages: List<ImageAttachment> get() = attachments.filter { it.attached }.sortedBy { it.selectionOrder }
     val preparingImages: Boolean get() = attachments.any { it.preparing }
     val canSendImages: Boolean get() = attachments.none { it.attached && (it.preparing || it.image == null) }
+
+    fun branchInfo(turnIndex: Int): BranchInfo? {
+        val node = chatTree.activePath().getOrNull(turnIndex) ?: return null
+        val siblings = chatTree.siblingsOf(node.id)
+        if (siblings.isEmpty()) return null
+        val position = siblings.indexOfFirst { it.id == node.id }.coerceAtLeast(0)
+        return BranchInfo(node.id, position, siblings.size)
+    }
 }
 
 class OpenAIChatViewModel(
@@ -147,8 +160,19 @@ class OpenAIChatViewModel(
 
     fun setPrompt(value: String) = update { it.copy(prompt = value) }
     fun setImage(value: OpenAIImage) = addAttachment(ImageAttachment(image = value))
+    fun setTemporaryAi(configuration: AiConfiguration?) {
+        update { state ->
+            val resolved = configuration?.let { candidate ->
+                val normalized = candidate.copy(api = candidate.api.normalized())
+                val resolvedCandidate = state.settings.resolve(normalized)
+                if (resolvedCandidate == state.settings.aiFor(state.selectedPreset)) null else normalized
+            }
+            state.copy(temporaryAi = resolved, error = null)
+        }
+    }
+    fun clearTemporaryAi() = update { it.copy(temporaryAi = null, error = null) }
     fun selectPreset(id: String?) {
-        update { it.copy(selectedPreset = id, prompt = presetText(it.settings, id), settings = it.settings.copy(lastPresetId = id),
+        update { it.copy(selectedPreset = id, temporaryAi = null, prompt = presetText(it.settings, id), settings = it.settings.copy(lastPresetId = id),
             attachments = if (id != it.selectedPreset) it.attachments.withScreenshotAttachment(it.settings.attachScreenshotFor(id)) else it.attachments) }
         presetSaveJob?.cancel()
         presetSaveJob = viewModelScope.launch {
@@ -293,9 +317,11 @@ class OpenAIChatViewModel(
                 val chat = active?.state?.value ?: history.load(id)
                 val settings = repository.load()
                 val selected = chat.selectedPreset?.takeIf { id -> settings.presets.any { it.id == id } }
+                val loadedTree = chat.resolvedTree
+                val openingTree = if (active == null) loadedTree.copy(activeLeafId = loadedTree.latestLeaf()?.id) else loadedTree
                 clearImageJobs()
-                update { it.copy(chatId = chat.id, turns = chat.turns, settings = settings, ready = true,
-                    selectedPreset = selected, prompt = "", attachments = emptyList(), croppingImageId = null,
+                update { it.copy(chatId = chat.id, chatTree = openingTree, turns = openingTree.activeTurns(), settings = settings, ready = true,
+                    selectedPreset = selected, temporaryAi = null, prompt = "", attachments = emptyList(), croppingImageId = null,
                     historyOpen = false, historyQuery = "", historySnippets = emptyMap()) }
                 requestUpdates?.cancel()
                 active?.let(::observeRequest)
@@ -315,6 +341,7 @@ class OpenAIChatViewModel(
                 update { it.copy(historyEntries = it.historyEntries.filterNot { entry -> entry.id == id },
                     historySnippets = it.historySnippets - id,
                     chatId = if (it.chatId == id) UUID.randomUUID().toString() else it.chatId,
+                    chatTree = if (it.chatId == id) ChatTree() else it.chatTree,
                     turns = if (it.chatId == id) emptyList() else it.turns) }
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { reportError("Could not delete chat: ${error.message}") }
@@ -338,13 +365,13 @@ class OpenAIChatViewModel(
             requestUpdates?.cancel()
             imageJobs.values.toList().forEach { it.cancelAndJoin() }
             imageJobs.clear()
-            update { it.copy(chatId = UUID.randomUUID().toString(), turns = emptyList(), attachments = emptyList(), croppingImageId = null, error = null) }
+            update { it.copy(chatId = UUID.randomUUID().toString(), chatTree = ChatTree(), turns = emptyList(), attachments = emptyList(), croppingImageId = null, error = null) }
             try {
                 val bitmap = capture()
                 presetSaveJob?.join()
                 val settings = repository.load()
                 update { it.copy(settings = settings, ready = true, selectedPreset = rememberedPreset(settings),
-                    prompt = presetText(settings, rememberedPreset(settings)), invoking = false) }
+                    temporaryAi = null, prompt = presetText(settings, rememberedPreset(settings)), invoking = false) }
                 attachBitmap(bitmap, screenshot = true, attached = settings.attachScreenshotFor(rememberedPreset(settings)))
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { update { it.copy(invoking = false, error = error.message ?: "Screen capture failed. Continue without an image.") } }
@@ -457,6 +484,8 @@ class OpenAIChatViewModel(
                     val selected = current.selectedPreset?.takeIf { id -> saved.presets.any { it.id == id } }
                     val conversationChanged = saved.copy(imageLimit = current.settings.imageLimit) != current.settings
                     current.copy(settings = saved, ready = true, settingsOpen = false, settingsDraft = null,
+                        temporaryAi = null,
+                        chatTree = if (conversationChanged) ChatTree() else current.chatTree,
                         turns = if (conversationChanged) emptyList() else current.turns, selectedPreset = selected,
                         chatId = if (conversationChanged) UUID.randomUUID().toString() else current.chatId,
                         attachments = if (saved.attachScreenshotFor(selected) != current.settings.attachScreenshotFor(current.selectedPreset))
@@ -531,17 +560,47 @@ class OpenAIChatViewModel(
         val images = snapshot.sendingImages.map { it.image!! }
         if (prompt.isBlank() && images.isEmpty()) { reportError("Enter a message, choose a preset, or attach an image."); return }
         val user = ChatMessage(MessageRole.User, prompt, images)
+        val newTurn = ChatTurn(user, ai, preset?.name)
         clearImageJobs()
-        update { it.copy(prompt = "", attachments = emptyList(), croppingImageId = null, error = null,
-            turns = it.turns + ChatTurn(user, ai, preset?.name)) }
+        update { state ->
+            val baseTree = if (state.chatTree.isEmpty && state.turns.isNotEmpty()) ChatTree.fromLinear(state.turns) else state.chatTree
+            val nextTree = baseTree.appendTurn(newTurn)
+            state.copy(
+                prompt = "",
+                attachments = emptyList(),
+                croppingImageId = null,
+                error = null,
+                chatTree = nextTree,
+                turns = nextTree.activeTurns(),
+            )
+        }
         rememberModelQuietly(ai.api)
         startRequest()
     }
 
-    fun retry() {
+    fun switchBranch(turnIndex: Int, delta: Int) {
+        val snapshot = _uiState.value
+        if (snapshot.isStreaming) return
+        val node = snapshot.chatTree.activePath().getOrNull(turnIndex) ?: return
+        val siblings = snapshot.chatTree.siblingsOf(node.id)
+        val nextIndex = siblings.indexOfFirst { it.id == node.id } + delta
+        if (nextIndex !in siblings.indices) return
+        val nextTree = snapshot.chatTree.selectBranch(siblings[nextIndex].id)
+        update { it.copy(chatTree = nextTree, turns = nextTree.activeTurns(), error = null) }
+    }
+
+    fun retry(override: AiConfiguration? = null, turnIndex: Int? = null) {
         val snapshot = _uiState.value
         if (snapshot.isStreaming || snapshot.turns.isEmpty() || snapshot.savingSettings) return
-        val original = snapshot.turns.last().ai.api
+        val targetIndex = turnIndex ?: snapshot.turns.lastIndex
+        if (targetIndex !in snapshot.turns.indices) return
+        val targetTurn = snapshot.turns[targetIndex]
+        val baseAi = if (override != null) {
+            snapshot.settings.resolve(override.copy(api = override.api.normalized()))
+        } else {
+            targetTurn.ai
+        }
+        val original = baseAi.api
         val configurations = snapshot.settings.credentialSources()
         val api = if (original.authentication == AuthenticationMethod.ChatGpt) original.copy(
             chatGptAccountId = original.chatGptAccountId ?: configurations.firstOrNull {
@@ -553,14 +612,40 @@ class OpenAIChatViewModel(
         }?.apiKey.orEmpty())
         val error = apiError(api, requireCredentials = true)
         if (error != null) { reportError(error); return }
-        val resume = snapshot.turns.last().status == TurnStatus.Interrupted && snapshot.turns.last().responseId != null && api.recoverResponses
+        val resume = override == null && targetIndex == snapshot.turns.lastIndex &&
+            targetTurn.status == TurnStatus.Interrupted && targetTurn.responseId != null && api.recoverResponses
         rememberModelQuietly(api)
+        if (override != null) {
+            val normalizedOverride = override.copy(api = override.api.normalized())
+            val resolvedOverride = snapshot.settings.resolve(normalizedOverride)
+            val temp = if (resolvedOverride == snapshot.settings.aiFor(snapshot.selectedPreset)) null else normalizedOverride
+            update { it.copy(temporaryAi = temp, error = null) }
+        }
         if (resume) {
-            updateLast { it.copy(ai = it.ai.copy(api = api), status = TurnStatus.Recovering, error = null, cancelRequested = false) }
+            updateLast { it.copy(ai = baseAi.copy(api = api), status = TurnStatus.Recovering, error = null, cancelRequested = false) }
             startRequest(RequestPurpose.Resume)
         } else {
-            updateLast { it.copy(ai = it.ai.copy(api = api), answer = "", reasoning = "", isThinking = false, status = TurnStatus.Streaming, error = null,
-                searchStatus = null, citations = emptyList(), generatedImages = emptyList(), imageGenerationStatus = null, responseId = null, cancelRequested = false) }
+            val retriedTurn = targetTurn.copy(
+                ai = baseAi.copy(api = api),
+                answer = "",
+                reasoning = "",
+                isThinking = false,
+                status = TurnStatus.Streaming,
+                error = null,
+                searchStatus = null,
+                citations = emptyList(),
+                generatedImages = emptyList(),
+                imageGenerationStatus = null,
+                responseId = null,
+                cancelRequested = false,
+            )
+            update { state ->
+                val baseTree = if (state.chatTree.isEmpty && state.turns.isNotEmpty()) ChatTree.fromLinear(state.turns) else state.chatTree
+                val targetNode = baseTree.activePath().getOrNull(targetIndex)
+                val nextTree = if (targetNode != null) baseTree.branchRetry(targetNode.id, retriedTurn)
+                    else baseTree.appendTurn(retriedTurn)
+                state.copy(chatTree = nextTree, turns = nextTree.activeTurns(), error = null)
+            }
             startRequest(RequestPurpose.Retry)
         }
     }
@@ -568,7 +653,16 @@ class OpenAIChatViewModel(
     private fun startRequest(purpose: RequestPurpose = RequestPurpose.Chat) {
         val snapshot = _uiState.value
         try {
-            observeRequest(requests.start(SavedChat(snapshot.chatId, System.currentTimeMillis(), snapshot.selectedPreset, snapshot.turns), purpose))
+            observeRequest(requests.start(
+                SavedChat(
+                    id = snapshot.chatId,
+                    updatedAt = System.currentTimeMillis(),
+                    selectedPreset = snapshot.selectedPreset,
+                    turns = snapshot.turns,
+                    tree = snapshot.chatTree.takeIf { it.hasBranches },
+                ),
+                purpose,
+            ))
         } catch (error: Exception) {
             updateLast { it.copy(status = TurnStatus.Failed, error = "Could not start background work: ${error.message}") }
         }
@@ -578,7 +672,9 @@ class OpenAIChatViewModel(
         requestUpdates?.cancel()
         requestUpdates = viewModelScope.launch {
             handle.state.collect { saved ->
-                update { if (it.chatId == saved.id) it.copy(turns = saved.turns) else it }
+                update {
+                    if (it.chatId == saved.id) it.copy(chatTree = saved.resolvedTree, turns = saved.turns) else it
+                }
             }
         }
     }
@@ -589,12 +685,19 @@ class OpenAIChatViewModel(
         requestUpdates?.cancel()
         clearImageJobs()
         showHistory(false)
-        update { it.copy(chatId = UUID.randomUUID().toString(), ready = false, turns = emptyList(), prompt = "", attachments = emptyList(),
+        update { it.copy(chatId = UUID.randomUUID().toString(), ready = false, temporaryAi = null, chatTree = ChatTree(), turns = emptyList(), prompt = "", attachments = emptyList(),
             croppingImageId = null, error = null) }
         loadSettings()
     }
 
-    private fun updateLast(transform: (ChatTurn) -> ChatTurn) = update { it.copy(turns = it.turns.dropLast(1) + transform(it.turns.last())) }
+    private fun updateLast(transform: (ChatTurn) -> ChatTurn) = update { state ->
+        if (!state.chatTree.isEmpty) {
+            val nextTree = state.chatTree.updateActiveLeaf(transform)
+            state.copy(chatTree = nextTree, turns = nextTree.activeTurns())
+        } else {
+            state.copy(turns = state.turns.dropLast(1) + transform(state.turns.last()))
+        }
+    }
     private fun update(transform: (OpenAIChatUiState) -> OpenAIChatUiState) { _uiState.update(transform) }
     private fun rememberedPreset(settings: AppSettings) = settings.lastPresetId?.takeIf { id -> settings.presets.any { it.id == id } }
     private fun presetText(settings: AppSettings, id: String?) = settings.presets.find { it.id == id }?.prompt.orEmpty()
@@ -658,11 +761,20 @@ class OpenAIChatViewModel(
         notice: String,
         transform: (OpenAIModelConfig) -> OpenAIModelConfig,
     ) {
+        val hadTemporary = _uiState.value.temporaryAi != null
         update { current ->
-            val updatedSettings = applyApiTransformToActivePreset(current.settings, presetId, transform)
-            val updatedDraft = current.settingsDraft?.let { draft -> applyApiTransformToActivePreset(draft, presetId, transform) }
-            current.copy(settings = updatedSettings, settingsDraft = updatedDraft, effortNotice = notice)
+            if (current.temporaryAi != null) {
+                current.copy(
+                    temporaryAi = current.temporaryAi.copy(api = transform(current.temporaryAi.api)),
+                    effortNotice = notice,
+                )
+            } else {
+                val updatedSettings = applyApiTransformToActivePreset(current.settings, presetId, transform)
+                val updatedDraft = current.settingsDraft?.let { draft -> applyApiTransformToActivePreset(draft, presetId, transform) }
+                current.copy(settings = updatedSettings, settingsDraft = updatedDraft, effortNotice = notice)
+            }
         }
+        if (hadTemporary) return
         viewModelScope.launch {
             try {
                 val persisted = applyApiTransformToActivePreset(repository.load(), presetId, transform)

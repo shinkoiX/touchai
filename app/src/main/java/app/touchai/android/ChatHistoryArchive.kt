@@ -16,9 +16,11 @@ class ChatHistoryArchive(private val history: ChatHistoryRepository) {
             writer.append("{\"format\":\"touchai-chat-history\",\"chats\":[")
             entries.forEachIndexed { index, entry ->
                 val chat = history.load(entry.id)
+                val body = encodeChatBody(chat.selectedPreset, chat.turns, chat.tree) { null }
                 val value = buildJsonObject {
-                    put("id", chat.id); put("updatedAt", chat.updatedAt); put("selectedPreset", chat.selectedPreset)
-                    putJsonArray("turns") { chat.turns.forEach { add(encodeChatTurn(it)) } }
+                    put("id", chat.id)
+                    put("updatedAt", chat.updatedAt)
+                    body.forEach { (key, element) -> put(key, element) }
                 }
                 if (index > 0) writer.append(',')
                 writer.append(value.toString())
@@ -35,8 +37,8 @@ class ChatHistoryArchive(private val history: ChatHistoryRepository) {
             // Decode and validate the entire external file before writing any conversations.
             val chats = archive.getValue("chats").jsonArray.map { item ->
                 val value = item.jsonObject
-                val turns = value.getValue("turns").jsonArray.map { serialized ->
-                    val decoded = decodeChatTurn(serialized.jsonObject, apiKey = "")
+                val decodedBody = decodeChatBody(value) { "" }
+                suspend fun sanitizeTurn(decoded: ChatTurn): ChatTurn {
                     val turn = decoded.copy(responseId = null, cancelRequested = false,
                         ai = decoded.ai.copy(api = decoded.ai.api.copy(chatGptAccountId = null)),
                         status = if (decoded.isRunning) TurnStatus.Interrupted else decoded.status)
@@ -50,11 +52,16 @@ class ChatHistoryArchive(private val history: ChatHistoryRepository) {
                         Base64.getDecoder().decode(image.url.substringAfter(','))
                         validateImage(image)
                     }
-                    turn
+                    return turn
                 }
+                val tree = decodedBody.tree?.let { rawTree ->
+                    val sanitizedNodes = rawTree.nodes.map { node -> node.copy(turn = sanitizeTurn(node.turn)) }
+                    ChatTree(sanitizedNodes, rawTree.activeLeafId)
+                }
+                val turns = tree?.activeTurns() ?: decodedBody.turns.map { sanitizeTurn(it) }
                 require(turns.isNotEmpty()) { "A chat contains no messages." }
                 SavedChat(UUID.randomUUID().toString(), value.getValue("updatedAt").jsonPrimitive.long,
-                    value.getValue("selectedPreset").jsonPrimitive.contentOrNull, turns)
+                    decodedBody.selectedPreset, turns, tree?.takeIf { it.hasBranches })
             }
             chats.forEach { history.save(it) }
             chats.size

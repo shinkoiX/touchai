@@ -74,12 +74,19 @@ class ChatRequestRunner(
                 val saved = history.load(entry.id)
                 val turn = saved.turns.last()
                 if (turn.responseId != null && turn.ai.api.recoverResponses) {
-                    start(saved.copy(turns = saved.turns.dropLast(1) + turn.copy(
-                        status = if (turn.cancelRequested) TurnStatus.Cancelling else TurnStatus.Recovering,
-                        error = null)), RequestPurpose.Resume)
+                    start(saved.updateActiveLeaf(saved.updatedAt) {
+                        it.copy(
+                            status = if (it.cancelRequested) TurnStatus.Cancelling else TurnStatus.Recovering,
+                            error = null,
+                        )
+                    }, RequestPurpose.Resume)
                 } else {
-                    history.save(saved.copy(turns = saved.turns.dropLast(1) + turn.copy(status = TurnStatus.Interrupted,
-                        error = "This interrupted request has no recoverable response ID. Retry starts a new request.")))
+                    history.save(saved.updateActiveLeaf(saved.updatedAt) {
+                        it.copy(
+                            status = TurnStatus.Interrupted,
+                            error = "This interrupted request has no recoverable response ID. Retry starts a new request.",
+                        )
+                    })
                 }
             }
             mutableError.value = null
@@ -188,8 +195,9 @@ class ChatRequestRunner(
             withContext(NonCancellable) {
                 handle.saveMutex.withLock {
                     val saved = handle.state.value
-                    val finished = saved.copy(updatedAt = System.currentTimeMillis(), turns = saved.turns.dropLast(1) +
-                        saved.turns.last().copy(status = status, isThinking = false, error = errorMessage, imageGenerationStatus = null, recoveryStatus = null))
+                    val finished = saved.updateActiveLeaf(System.currentTimeMillis()) {
+                        it.copy(status = status, isThinking = false, error = errorMessage, imageGenerationStatus = null, recoveryStatus = null)
+                    }
                     try { history.save(finished) }
                     catch (error: Exception) { mutableError.value = "Could not save chat: ${error.message}" }
                     handle.mutableState.value = finished
@@ -251,7 +259,7 @@ class ChatRequestRunner(
     }
 
     private fun update(handle: ActiveChatRequest, transform: (ChatTurn) -> ChatTurn) {
-        handle.mutableState.update { it.copy(updatedAt = System.currentTimeMillis(), turns = it.turns.dropLast(1) + transform(it.turns.last())) }
+        handle.mutableState.update { it.updateActiveLeaf(System.currentTimeMillis(), transform) }
     }
 
     private suspend fun save(handle: ActiveChatRequest) = handle.saveMutex.withLock {

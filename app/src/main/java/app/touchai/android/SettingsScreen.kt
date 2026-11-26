@@ -307,7 +307,11 @@ private fun AiConfigurationEditor(value: AiConfiguration, connections: List<ApiC
 }
 
 @Composable
-private fun ReasoningEffortEditor(effort: String?, onChange: (String?) -> Unit) {
+internal fun ReasoningEffortEditor(
+    effort: String?,
+    showCustomInput: Boolean = true,
+    onChange: (String?) -> Unit,
+) {
     val tiers = ReasoningEffortTiers
     val normalized = effort?.trim()?.lowercase()
     val exactIndex = tiers.indexOf(normalized)
@@ -316,7 +320,7 @@ private fun ReasoningEffortEditor(effort: String?, onChange: (String?) -> Unit) 
         normalized == "minimal" -> 0
         else -> 2
     }
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
             Text("Reasoning effort", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -356,20 +360,27 @@ private fun ReasoningEffortEditor(effort: String?, onChange: (String?) -> Unit) 
                 )
             }
         }
-        Spacer(Modifier.height(4.dp))
-        OutlinedTextField(
-            value = effort ?: "",
-            onValueChange = { text -> onChange(text.takeIf(String::isNotBlank)) },
-            label = { Text("Custom effort") },
-            placeholder = { Text("Default (none / minimal / low / medium / high / xhigh / max)") },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        if (showCustomInput) {
+            Spacer(Modifier.height(4.dp))
+            OutlinedTextField(
+                value = effort ?: "",
+                onValueChange = { text -> onChange(text.takeIf(String::isNotBlank)) },
+                label = { Text("Custom effort") },
+                placeholder = { Text("Default (none / minimal / low / medium / high / xhigh / max)") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 }
 
 @Composable
-private fun ServiceTierEditor(protocol: ApiProtocol, serviceTier: String?, onChange: (String?) -> Unit) {
+internal fun ServiceTierEditor(
+    protocol: ApiProtocol,
+    serviceTier: String?,
+    showHeader: Boolean = true,
+    onChange: (String?) -> Unit,
+) {
     val options = if (protocol == ApiProtocol.Gemini) GeminiServiceTiers else OpenAiServiceTiers
     val effective = wireServiceTier(protocol, serviceTier)
     val selectedOption = when {
@@ -378,7 +389,9 @@ private fun ServiceTierEditor(protocol: ApiProtocol, serviceTier: String?, onCha
         else -> null
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Service tier", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (showHeader) {
+            Text("Service tier", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         Choices(
             options = options,
             selected = { it == selectedOption },

@@ -27,7 +27,8 @@ internal fun extractSearchText(chat: SavedChat): String = buildString {
         if (isNotEmpty()) append('\n')
         append(normalized)
     }
-    chat.turns.forEach { turn ->
+    // Only index the latest version of a branched conversation tree.
+    chat.latestTurns.forEach { turn ->
         appendSegment(turn.user.text)
         appendSegment(turn.answer)
         appendSegment(turn.reasoning)
