@@ -23,8 +23,8 @@ android {
         applicationId = "app.touchai.android"
         minSdk = 30
         targetSdk = 36
-        versionCode = 15
-        versionName = "1.3.8"
+        versionCode = 16
+        versionName = "1.3.8.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField("String", "GITHUB_REPOSITORY", "\"${githubRepository.replace("\"", "\\\"")}\"")
     }
