@@ -29,7 +29,7 @@ data class SavedChat(
                 title = latest.first().user.text.replace(Regex("\\s+"), " ").trim().take(80).ifEmpty { "Image chat" },
                 updatedAt = updatedAt,
                 turnCount = latest.size,
-                pending = turns.lastOrNull()?.isRunning == true || latest.last().isRunning,
+                pending = tree?.hasRunningNodes == true || turns.any { it.isRunning } || latest.last().isRunning,
             )
         }
 
@@ -40,6 +40,21 @@ data class SavedChat(
             return copy(updatedAt = updatedAt, turns = updatedTree.activeTurns(), tree = updatedTree.takeIf { it.hasBranches })
         }
         return copy(updatedAt = updatedAt, turns = turns.dropLast(1) + transform(turns.last()))
+    }
+
+    fun updateNode(nodeId: String?, updatedAt: Long, transform: (ChatTurn) -> ChatTurn): SavedChat {
+        val currentTree = tree
+        if (currentTree != null && nodeId != null) {
+            val updatedTree = currentTree.updateNode(nodeId, transform)
+            return copy(updatedAt = updatedAt, turns = updatedTree.activeTurns(), tree = updatedTree.takeIf { it.hasBranches })
+        }
+        return updateActiveLeaf(updatedAt, transform)
+    }
+
+    fun selectBranch(nodeId: String): SavedChat {
+        val currentTree = tree ?: return this
+        val updatedTree = currentTree.selectBranch(nodeId)
+        return copy(turns = updatedTree.activeTurns(), tree = updatedTree.takeIf { it.hasBranches })
     }
 }
 

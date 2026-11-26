@@ -70,7 +70,11 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                     key(connection.id) {
                         val usedBy = buildList {
                             if (draft.connectionId == connection.id) add("Default AI")
-                            draft.presets.filter { it.customAi?.connectionId == connection.id }.forEach { add(it.name.ifBlank { "New preset" }) }
+                            draft.presets.forEach { preset ->
+                                val presetLabel = preset.name.ifBlank { "New preset" }
+                                if (preset.customAi?.connectionId == connection.id) add(presetLabel)
+                                if (preset.secondaryAi?.connectionId == connection.id) add("$presetLabel (2nd AI)")
+                            }
                         }
                         ConnectionEditor(connection, expanded = expandedConnection == connection.id, usedBy = usedBy,
                             onExpand = { expandedConnection = if (expandedConnection == connection.id) null else connection.id },
@@ -121,10 +125,25 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                                 verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
                                     Text(preset.name.ifBlank { "New preset" }, style = MaterialTheme.typography.titleMedium)
-                                    Text(preset.customAi?.let { ai ->
+                                    val primarySummary = preset.customAi?.let { ai ->
                                         listOfNotNull(draft.connection(ai.connectionId)?.name, ai.api.model.takeIf(String::isNotBlank)).joinToString(" · ").ifBlank { "Custom AI" }
-                                    } ?: "Default AI",
-                                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    } ?: "Default AI"
+                                    val subtitleText = preset.secondaryAi?.let { secondary ->
+                                        val secondaryLabel = secondary.api.model.takeIf(String::isNotBlank)
+                                            ?: draft.connection(secondary.connectionId)?.name
+                                            ?: "2nd AI"
+                                        val primaryLabel = preset.customAi?.api?.model?.takeIf(String::isNotBlank)
+                                            ?: draft.api.model.takeIf(String::isNotBlank)
+                                            ?: primarySummary
+                                        "2× · $primaryLabel ⇄ $secondaryLabel"
+                                    } ?: primarySummary
+                                    Text(
+                                        subtitleText,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = if (preset.secondaryAi != null) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
                                 }
                                 AppIconButton(R.drawable.ic_arrow_up, "Move ${preset.name} up", {
                                     onDraftChange(draft.copy(presets = draft.presets.toMutableList().apply { add(index - 1, removeAt(index)) }))
@@ -149,6 +168,18 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                                 preset.customAi?.let { configuration ->
                                     AiConfigurationEditor(configuration, draft.connections, { change(preset.copy(customAi = it)) })
                                     TestButton(state.testingConnection) { onTest(draft.resolve(configuration), preset.name) }
+                                }
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 16.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                                )
+                                SwitchRow("Dual send (2nd AI)", preset.secondaryAi != null, { dual ->
+                                    val seed = preset.customAi ?: draft.defaultAi
+                                    change(preset.copy(secondaryAi = if (dual) seed.copy(api = seed.api.copy(webSearch = true)) else null))
+                                })
+                                preset.secondaryAi?.let { secondary ->
+                                    AiConfigurationEditor(secondary, draft.connections, { change(preset.copy(secondaryAi = it)) })
+                                    TestButton(state.testingConnection) { onTest(draft.resolve(secondary), "${preset.name} (2nd AI)") }
                                 }
                                 Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.End) {
                                     AppIconButton(R.drawable.ic_delete, "Remove", {

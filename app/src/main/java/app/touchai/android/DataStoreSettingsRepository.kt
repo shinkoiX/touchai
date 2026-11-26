@@ -51,6 +51,7 @@ class DataStoreSettingsRepository(
                         preset.getValue("name").jsonPrimitive.content,
                         preset.getValue("prompt").jsonPrimitive.content,
                         (preset["ai"] as? JsonObject)?.let(::decodeAi),
+                        (preset["secondaryAi"] as? JsonObject)?.let(::decodeAi),
                         attachScreenshot = preset["attachScreenshot"]?.jsonPrimitive?.booleanOrNull)
                 }
             } ?: defaults.presets,
@@ -71,6 +72,7 @@ class DataStoreSettingsRepository(
                 put("prompt", preset.prompt)
                 put("attachScreenshot", preset.attachScreenshot)
                 preset.customAi?.let { put("ai", encodeAi(it)) }
+                preset.secondaryAi?.let { put("secondaryAi", encodeAi(it)) }
             }) }
         }.toString()
         store.edit { prefs ->

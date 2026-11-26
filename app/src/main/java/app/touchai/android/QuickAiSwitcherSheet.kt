@@ -16,14 +16,15 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.wireServiceTier
 
 /**
- * Compact bottom sheet for temporarily switching connection, model, reasoning effort, and service tier
- * without editing saved Settings — used both for upcoming messages and for switching on Retry.
+ * Compact bottom sheet for temporarily switching connection, model, reasoning effort, service tier,
+ * and optional dual-send (A/B) comparison without editing saved Settings.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,12 +37,23 @@ fun QuickAiSwitcherSheet(
     liveUpdate: Boolean,
     onApply: (AiConfiguration) -> Unit,
     onReset: (() -> Unit)? = null,
+    allowDual: Boolean = false,
+    dualEnabled: Boolean = false,
+    initialSecondary: AiConfiguration? = null,
+    initialSlot: Int = 0,
+    onDualModeChange: ((Boolean) -> Unit)? = null,
+    onApplySecondary: ((AiConfiguration) -> Unit)? = null,
     onDismiss: () -> Unit,
 ) {
     val app = LocalContext.current.applicationContext as TouchAiApplication
     val recentModels by app.settingsRepository.recentModels.collectAsStateWithLifecycle(initialValue = emptyList())
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var draft by remember(initial) { mutableStateOf(initial) }
+    var primaryDraft by remember(initial) { mutableStateOf(initial) }
+    var secondaryDraft by remember(initialSecondary, initial) { mutableStateOf(initialSecondary ?: initial) }
+    var isDual by remember(dualEnabled) { mutableStateOf(allowDual && dualEnabled) }
+    var activeSlot by remember(initialSlot) { mutableIntStateOf(if (allowDual && dualEnabled) initialSlot.coerceIn(0, 1) else 0) }
+    val draft = if (isDual && activeSlot == 1) secondaryDraft else primaryDraft
+
     val selectedConnection = connections.find { it.id == draft.connectionId }
         ?: connections.firstOrNull { conn ->
             conn.authentication == draft.api.authentication &&
@@ -64,12 +76,17 @@ fun QuickAiSwitcherSheet(
             if (current.isNotEmpty() && current !in this) add(0, current)
         }
     }
-    var showAllModels by remember(endpointKey) { mutableStateOf(quickModels.isEmpty()) }
+    var showAllModels by remember(endpointKey, activeSlot) { mutableStateOf(quickModels.isEmpty()) }
     var speedExpanded by remember { mutableStateOf(false) }
 
     fun updateDraft(next: AiConfiguration) {
-        draft = next
-        if (liveUpdate) onApply(next)
+        if (isDual && activeSlot == 1) {
+            secondaryDraft = next
+            if (liveUpdate) onApplySecondary?.invoke(next)
+        } else {
+            primaryDraft = next
+            if (liveUpdate) onApply(next)
+        }
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -80,20 +97,69 @@ fun QuickAiSwitcherSheet(
                 .padding(start = 16.dp, end = 16.dp, bottom = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(
+                    if (isDual) "Dual send" else title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (allowDual && onDualModeChange != null) {
+                    FilterChip(
+                        selected = isDual,
+                        onClick = {
+                            val next = !isDual
+                            isDual = next
+                            if (next) {
+                                activeSlot = 1
+                            } else {
+                                activeSlot = 0
+                            }
+                            onDualModeChange(next)
+                        },
+                        label = { Text("2×", fontWeight = FontWeight.SemiBold) },
+                        shape = CircleShape,
+                        colors = FilterChipDefaults.filterChipColors(
+                            selectedContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                            selectedLabelColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                        ),
+                    )
+                }
                 if (canReset && onReset != null) {
                     TextButton(onClick = { onReset(); onDismiss() }) { Text("Reset") }
                 }
                 if (!liveUpdate) {
                     Button(
                         onClick = {
-                            onApply(draft)
+                            onApply(primaryDraft)
                             onDismiss()
                         },
-                        enabled = draft.api.model.isNotBlank(),
+                        enabled = primaryDraft.api.model.isNotBlank(),
                     ) {
                         Text(confirmLabel)
+                    }
+                }
+            }
+
+            if (isDual) {
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    val slots = listOf(
+                        "A · ${primaryDraft.api.model.ifBlank { "Pick model" }}",
+                        "B · ${secondaryDraft.api.model.ifBlank { "Pick model" }}",
+                    )
+                    slots.forEachIndexed { index, label ->
+                        SegmentedButton(
+                            selected = activeSlot == index,
+                            onClick = { activeSlot = index },
+                            shape = SegmentedButtonDefaults.itemShape(index, slots.size),
+                            icon = {},
+                        ) {
+                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        }
                     }
                 }
             }

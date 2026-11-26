@@ -21,6 +21,10 @@ data class ChatTree(
 ) {
     val isEmpty: Boolean get() = nodes.isEmpty()
 
+    val hasRunningNodes: Boolean get() = nodes.any { it.turn.isRunning }
+
+    fun runningNodes(): List<ChatTreeNode> = nodes.filter { it.turn.isRunning }
+
     val hasBranches: Boolean
         get() {
             if (nodes.size <= 1) return false
@@ -78,6 +82,19 @@ data class ChatTree(
         val timestamp = maxOf(now, (nodes.maxOfOrNull { it.createdAt } ?: 0L) + 1L)
         val created = ChatTreeNode(parentId = parentId, turn = turn, createdAt = timestamp)
         return ChatTree(nodes = nodes + created, activeLeafId = created.id)
+    }
+
+    /** Appends two sibling turns under the current active leaf for dual-config comparison. */
+    fun appendDualTurns(
+        first: ChatTurn,
+        second: ChatTurn,
+        now: Long = System.currentTimeMillis(),
+    ): Pair<ChatTree, List<String>> {
+        val parentId = activePath().lastOrNull()?.id
+        val baseTimestamp = maxOf(now, (nodes.maxOfOrNull { it.createdAt } ?: 0L) + 1L)
+        val firstNode = ChatTreeNode(parentId = parentId, turn = first, createdAt = baseTimestamp)
+        val secondNode = ChatTreeNode(parentId = parentId, turn = second, createdAt = baseTimestamp + 1L)
+        return ChatTree(nodes = nodes + firstNode + secondNode, activeLeafId = firstNode.id) to listOf(firstNode.id, secondNode.id)
     }
 
     /** Creates a new sibling branch at the same parent as [targetNodeId], preserving the old branch and its subtree. */

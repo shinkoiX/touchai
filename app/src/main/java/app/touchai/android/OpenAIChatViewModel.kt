@@ -42,6 +42,7 @@ data class ChatTurn(
     val responseId: String? = null,
     val cancelRequested: Boolean = false,
     val recoveryStatus: String? = null,
+    val compareGroupId: String? = null,
 ) {
     val isRunning: Boolean get() = status in listOf(TurnStatus.Streaming, TurnStatus.Recovering, TurnStatus.Cancelling)
 }
@@ -69,7 +70,18 @@ private fun List<ImageAttachment>.withScreenshotAttachment(attached: Boolean): L
     }
 }
 
-data class BranchInfo(val nodeId: String, val index: Int, val count: Int)
+data class CompareTabInfo(
+    val nodeId: String,
+    val turn: ChatTurn,
+    val selected: Boolean,
+)
+
+data class BranchInfo(
+    val nodeId: String,
+    val index: Int,
+    val count: Int,
+    val compareTabs: List<CompareTabInfo> = emptyList(),
+)
 
 data class OpenAIChatUiState(
     val settings: AppSettings = AppSettings(),
@@ -97,13 +109,25 @@ data class OpenAIChatUiState(
     val prompt: String = "",
     val selectedPreset: String? = null,
     val temporaryAi: AiConfiguration? = null,
+    val temporaryDualMode: Boolean? = null,
+    val temporarySecondaryAi: AiConfiguration? = null,
+    val lastSecondaryAi: AiConfiguration? = null,
     val chatTree: ChatTree = ChatTree(),
     val turns: List<ChatTurn> = emptyList(),
     val error: String? = null,
 ) {
-    val isStreaming: Boolean get() = turns.lastOrNull()?.isRunning == true
+    val isStreaming: Boolean get() = chatTree.hasRunningNodes || turns.any { it.isRunning }
+    val runningCount: Int get() = if (chatTree.isEmpty) turns.count { it.isRunning } else chatTree.runningNodes().size
     val selectedAi: AiConfiguration get() = temporaryAi?.let(settings::resolve) ?: settings.aiFor(selectedPreset)
-    val hasTemporaryAi: Boolean get() = temporaryAi != null
+    val presetSecondaryAi: AiConfiguration? get() = settings.secondaryAiFor(selectedPreset)
+    val isDualMode: Boolean get() = temporaryDualMode ?: (presetSecondaryAi != null)
+    val selectedSecondaryAi: AiConfiguration?
+        get() = if (!isDualMode) null
+        else temporarySecondaryAi?.let(settings::resolve)
+            ?: presetSecondaryAi
+            ?: lastSecondaryAi?.let(settings::resolve)
+            ?: selectedAi
+    val hasTemporaryAi: Boolean get() = temporaryAi != null || temporaryDualMode != null || temporarySecondaryAi != null
     val sendingImages: List<ImageAttachment> get() = attachments.filter { it.attached }.sortedBy { it.selectionOrder }
     val preparingImages: Boolean get() = attachments.any { it.preparing }
     val canSendImages: Boolean get() = attachments.none { it.attached && (it.preparing || it.image == null) }
@@ -113,7 +137,14 @@ data class OpenAIChatUiState(
         val siblings = chatTree.siblingsOf(node.id)
         if (siblings.isEmpty()) return null
         val position = siblings.indexOfFirst { it.id == node.id }.coerceAtLeast(0)
-        return BranchInfo(node.id, position, siblings.size)
+        val groupId = node.turn.compareGroupId
+        val compareTabs = if (groupId != null) {
+            val groupSiblings = siblings.filter { it.turn.compareGroupId == groupId }
+            if (groupSiblings.size >= 2) {
+                groupSiblings.map { sibling -> CompareTabInfo(sibling.id, sibling.turn, sibling.id == node.id) }
+            } else emptyList()
+        } else emptyList()
+        return BranchInfo(node.id, position, siblings.size, compareTabs)
     }
 }
 
@@ -170,9 +201,65 @@ class OpenAIChatViewModel(
             state.copy(temporaryAi = resolved, error = null)
         }
     }
-    fun clearTemporaryAi() = update { it.copy(temporaryAi = null, error = null) }
+    fun setDualMode(enabled: Boolean) {
+        update { state ->
+            val presetHasDual = state.presetSecondaryAi != null
+            val nextDualOverride = if (enabled == presetHasDual) null else enabled
+            val nextLastSecondary = if (enabled) {
+                state.temporarySecondaryAi ?: state.presetSecondaryAi ?: state.lastSecondaryAi ?: state.selectedAi
+            } else {
+                state.temporarySecondaryAi ?: state.lastSecondaryAi
+            }
+            state.copy(
+                temporaryDualMode = nextDualOverride,
+                lastSecondaryAi = nextLastSecondary,
+                error = null,
+            )
+        }
+    }
+    fun setTemporarySecondaryAi(configuration: AiConfiguration?) {
+        update { state ->
+            val normalized = configuration?.copy(api = configuration.api.normalized())
+            val resolvedCandidate = normalized?.let(state.settings::resolve)
+            val presetSecondary = state.presetSecondaryAi
+            val tempSecondary = if (resolvedCandidate == presetSecondary) null else normalized
+            val nextDualOverride = if (normalized != null) {
+                if (presetSecondary != null) null else true
+            } else {
+                state.temporaryDualMode
+            }
+            state.copy(
+                temporaryDualMode = nextDualOverride,
+                temporarySecondaryAi = tempSecondary,
+                lastSecondaryAi = normalized ?: state.lastSecondaryAi,
+                error = null,
+            )
+        }
+    }
+    /**
+     * Toggles dual-send mode on long-press of the Send button.
+     * Returns true when enabling dual mode for the first time without a distinct 2nd AI configured,
+     * signaling the UI to open the switcher directly on slot B.
+     */
+    fun toggleDualModeByLongPress(): Boolean {
+        val state = _uiState.value
+        if (state.isDualMode) {
+            setDualMode(false)
+            return false
+        }
+        val existingSecondary = state.temporarySecondaryAi?.let(state.settings::resolve)
+            ?: state.presetSecondaryAi
+            ?: state.lastSecondaryAi?.let(state.settings::resolve)
+        val hasDistinctSecondary = existingSecondary != null &&
+            existingSecondary.api.model.isNotBlank() &&
+            existingSecondary != state.selectedAi
+        setDualMode(true)
+        return !hasDistinctSecondary
+    }
+    fun clearTemporaryAi() = update { it.copy(temporaryAi = null, temporaryDualMode = null, temporarySecondaryAi = null, error = null) }
     fun selectPreset(id: String?) {
-        update { it.copy(selectedPreset = id, temporaryAi = null, prompt = presetText(it.settings, id), settings = it.settings.copy(lastPresetId = id),
+        update { it.copy(selectedPreset = id, temporaryAi = null, temporaryDualMode = null, temporarySecondaryAi = null,
+            prompt = presetText(it.settings, id), settings = it.settings.copy(lastPresetId = id),
             attachments = if (id != it.selectedPreset) it.attachments.withScreenshotAttachment(it.settings.attachScreenshotFor(id)) else it.attachments) }
         presetSaveJob?.cancel()
         presetSaveJob = viewModelScope.launch {
@@ -321,7 +408,7 @@ class OpenAIChatViewModel(
                 val openingTree = if (active == null) loadedTree.copy(activeLeafId = loadedTree.latestLeaf()?.id) else loadedTree
                 clearImageJobs()
                 update { it.copy(chatId = chat.id, chatTree = openingTree, turns = openingTree.activeTurns(), settings = settings, ready = true,
-                    selectedPreset = selected, temporaryAi = null, prompt = "", attachments = emptyList(), croppingImageId = null,
+                    selectedPreset = selected, temporaryAi = null, temporaryDualMode = null, temporarySecondaryAi = null, prompt = "", attachments = emptyList(), croppingImageId = null,
                     historyOpen = false, historyQuery = "", historySnippets = emptyMap()) }
                 requestUpdates?.cancel()
                 active?.let(::observeRequest)
@@ -371,7 +458,7 @@ class OpenAIChatViewModel(
                 presetSaveJob?.join()
                 val settings = repository.load()
                 update { it.copy(settings = settings, ready = true, selectedPreset = rememberedPreset(settings),
-                    temporaryAi = null, prompt = presetText(settings, rememberedPreset(settings)), invoking = false) }
+                    temporaryAi = null, temporaryDualMode = null, temporarySecondaryAi = null, prompt = presetText(settings, rememberedPreset(settings)), invoking = false) }
                 attachBitmap(bitmap, screenshot = true, attached = settings.attachScreenshotFor(rememberedPreset(settings)))
             } catch (error: CancellationException) { throw error }
             catch (error: Exception) { update { it.copy(invoking = false, error = error.message ?: "Screen capture failed. Continue without an image.") } }
@@ -466,7 +553,8 @@ class OpenAIChatViewModel(
             api = settings.api.normalized(),
             connections = settings.connections.map { it.normalized() },
             presets = settings.presets.map { preset -> preset.copy(name = preset.name.trim(),
-                customAi = preset.customAi?.let { it.copy(api = it.api.normalized()) }) },
+                customAi = preset.customAi?.let { it.copy(api = it.api.normalized()) },
+                secondaryAi = preset.secondaryAi?.let { it.copy(api = it.api.normalized()) }) },
             lastPresetId = settings.lastPresetId?.takeIf { id -> settings.presets.any { it.id == id } },
         )
         val error = settingsError(normalized)
@@ -484,7 +572,7 @@ class OpenAIChatViewModel(
                     val selected = current.selectedPreset?.takeIf { id -> saved.presets.any { it.id == id } }
                     val conversationChanged = saved.copy(imageLimit = current.settings.imageLimit) != current.settings
                     current.copy(settings = saved, ready = true, settingsOpen = false, settingsDraft = null,
-                        temporaryAi = null,
+                        temporaryAi = null, temporaryDualMode = null, temporarySecondaryAi = null,
                         chatTree = if (conversationChanged) ChatTree() else current.chatTree,
                         turns = if (conversationChanged) emptyList() else current.turns, selectedPreset = selected,
                         chatId = if (conversationChanged) UUID.randomUUID().toString() else current.chatId,
@@ -555,38 +643,78 @@ class OpenAIChatViewModel(
         val ai = snapshot.selectedAi
         val error = apiError(ai.api, requireCredentials = true)
         if (error != null) { update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = error) }; return }
+        val secondaryAi = if (snapshot.isDualMode) snapshot.selectedSecondaryAi else null
+        if (secondaryAi != null) {
+            val secondaryError = apiError(secondaryAi.api, requireCredentials = true)
+            if (secondaryError != null) {
+                update { it.copy(settingsOpen = true, settingsDraft = it.settings, error = "2nd AI: $secondaryError") }
+                return
+            }
+        }
         val preset = snapshot.settings.presets.find { it.id == snapshot.selectedPreset }
         val prompt = snapshot.prompt.trim()
         val images = snapshot.sendingImages.map { it.image!! }
         if (prompt.isBlank() && images.isEmpty()) { reportError("Enter a message, choose a preset, or attach an image."); return }
         val user = ChatMessage(MessageRole.User, prompt, images)
-        val newTurn = ChatTurn(user, ai, preset?.name)
         clearImageJobs()
-        update { state ->
-            val baseTree = if (state.chatTree.isEmpty && state.turns.isNotEmpty()) ChatTree.fromLinear(state.turns) else state.chatTree
-            val nextTree = baseTree.appendTurn(newTurn)
-            state.copy(
-                prompt = "",
-                attachments = emptyList(),
-                croppingImageId = null,
-                error = null,
-                chatTree = nextTree,
-                turns = nextTree.activeTurns(),
-            )
+        var targetNodeIds: List<String>? = null
+        if (secondaryAi != null) {
+            val compareGroupId = UUID.randomUUID().toString()
+            val firstTurn = ChatTurn(user, ai, preset?.name, compareGroupId = compareGroupId)
+            val secondTurn = ChatTurn(user, secondaryAi, preset?.name, compareGroupId = compareGroupId)
+            update { state ->
+                val baseTree = if (state.chatTree.isEmpty && state.turns.isNotEmpty()) ChatTree.fromLinear(state.turns) else state.chatTree
+                val (nextTree, nodeIds) = baseTree.appendDualTurns(firstTurn, secondTurn)
+                targetNodeIds = nodeIds
+                state.copy(
+                    prompt = "",
+                    attachments = emptyList(),
+                    croppingImageId = null,
+                    error = null,
+                    lastSecondaryAi = state.temporarySecondaryAi ?: state.presetSecondaryAi ?: state.lastSecondaryAi ?: secondaryAi,
+                    chatTree = nextTree,
+                    turns = nextTree.activeTurns(),
+                )
+            }
+            rememberModelQuietly(ai.api)
+            rememberModelQuietly(secondaryAi.api)
+        } else {
+            val newTurn = ChatTurn(user, ai, preset?.name)
+            update { state ->
+                val baseTree = if (state.chatTree.isEmpty && state.turns.isNotEmpty()) ChatTree.fromLinear(state.turns) else state.chatTree
+                val nextTree = baseTree.appendTurn(newTurn)
+                state.copy(
+                    prompt = "",
+                    attachments = emptyList(),
+                    croppingImageId = null,
+                    error = null,
+                    chatTree = nextTree,
+                    turns = nextTree.activeTurns(),
+                )
+            }
+            rememberModelQuietly(ai.api)
         }
-        rememberModelQuietly(ai.api)
-        startRequest()
+        startRequest(targetNodeIds = targetNodeIds)
+    }
+
+    fun selectBranchNode(nodeId: String) {
+        val snapshot = _uiState.value
+        if (snapshot.chatTree.node(nodeId) == null) return
+        if (requests.find(snapshot.chatId) != null) {
+            requests.selectNode(snapshot.chatId, nodeId)
+        } else {
+            val nextTree = snapshot.chatTree.selectBranch(nodeId)
+            update { it.copy(chatTree = nextTree, turns = nextTree.activeTurns(), error = null) }
+        }
     }
 
     fun switchBranch(turnIndex: Int, delta: Int) {
         val snapshot = _uiState.value
-        if (snapshot.isStreaming) return
         val node = snapshot.chatTree.activePath().getOrNull(turnIndex) ?: return
         val siblings = snapshot.chatTree.siblingsOf(node.id)
         val nextIndex = siblings.indexOfFirst { it.id == node.id } + delta
         if (nextIndex !in siblings.indices) return
-        val nextTree = snapshot.chatTree.selectBranch(siblings[nextIndex].id)
-        update { it.copy(chatTree = nextTree, turns = nextTree.activeTurns(), error = null) }
+        selectBranchNode(siblings[nextIndex].id)
     }
 
     fun retry(override: AiConfiguration? = null, turnIndex: Int? = null) {
@@ -650,7 +778,7 @@ class OpenAIChatViewModel(
         }
     }
 
-    private fun startRequest(purpose: RequestPurpose = RequestPurpose.Chat) {
+    private fun startRequest(purpose: RequestPurpose = RequestPurpose.Chat, targetNodeIds: List<String>? = null) {
         val snapshot = _uiState.value
         try {
             observeRequest(requests.start(
@@ -662,9 +790,20 @@ class OpenAIChatViewModel(
                     tree = snapshot.chatTree.takeIf { it.hasBranches },
                 ),
                 purpose,
+                targetNodeIds = targetNodeIds,
             ))
         } catch (error: Exception) {
-            updateLast { it.copy(status = TurnStatus.Failed, error = "Could not start background work: ${error.message}") }
+            val failedMessage = "Could not start background work: ${error.message}"
+            if (!targetNodeIds.isNullOrEmpty()) {
+                update { state ->
+                    val nextTree = targetNodeIds.fold(state.chatTree) { tree, nodeId ->
+                        tree.updateNode(nodeId) { it.copy(status = TurnStatus.Failed, error = failedMessage) }
+                    }
+                    state.copy(chatTree = nextTree, turns = nextTree.activeTurns())
+                }
+            } else {
+                updateLast { it.copy(status = TurnStatus.Failed, error = failedMessage) }
+            }
         }
     }
 
@@ -680,6 +819,7 @@ class OpenAIChatViewModel(
     }
 
     fun cancel() { requests.stop(_uiState.value.chatId) }
+    fun cancelNode(nodeId: String) { requests.stopNode(_uiState.value.chatId, nodeId) }
     fun newChat() {
         if (_uiState.value.preparingImages || _uiState.value.historyLoading || _uiState.value.capturingScreenshot) return
         requestUpdates?.cancel()
@@ -719,14 +859,17 @@ class OpenAIChatViewModel(
             val toRecord = ArrayList<RecentModelEntry>()
             val beforePresets = before.presets.associateBy { it.id }
             for (preset in saved.presets) {
-                val custom = preset.customAi ?: continue
-                val api = saved.resolve(custom).api
-                val model = api.model.trim()
-                if (model.isEmpty()) continue
-                val entry = RecentModelEntry(model, api.recentEndpointKey())
-                val prevApi = beforePresets[preset.id]?.customAi?.let { before.resolve(it).api }
-                val changed = prevApi?.model?.trim() != model || prevApi.recentEndpointKey() != entry.endpointKey
-                if (changed || entry !in existingRecent) toRecord.add(entry)
+                for ((slot, custom) in listOf(false to preset.customAi, true to preset.secondaryAi)) {
+                    if (custom == null) continue
+                    val api = saved.resolve(custom).api
+                    val model = api.model.trim()
+                    if (model.isEmpty()) continue
+                    val entry = RecentModelEntry(model, api.recentEndpointKey())
+                    val prevConfig = if (slot) beforePresets[preset.id]?.secondaryAi else beforePresets[preset.id]?.customAi
+                    val prevApi = prevConfig?.let { before.resolve(it).api }
+                    val changed = prevApi?.model?.trim() != model || prevApi.recentEndpointKey() != entry.endpointKey
+                    if (changed || entry !in existingRecent) toRecord.add(entry)
+                }
             }
             val defaultApi = saved.resolve(saved.defaultAi).api
             val defaultModel = defaultApi.model.trim()
@@ -745,6 +888,7 @@ class OpenAIChatViewModel(
     private fun handleEffortAdjustment(adjustment: EffortAdjustmentNotice) {
         applyRuntimeApiAdjustment(
             presetId = adjustment.presetId,
+            isSecondary = adjustment.isSecondary,
             notice = formatEffortAdjustmentNotice(adjustment.requested, adjustment.applied),
         ) { it.copy(reasoningEffort = adjustment.applied) }
     }
@@ -752,18 +896,39 @@ class OpenAIChatViewModel(
     private fun handleServiceTierAdjustment(adjustment: ServiceTierAdjustmentNotice) {
         applyRuntimeApiAdjustment(
             presetId = adjustment.presetId,
+            isSecondary = adjustment.isSecondary,
             notice = formatServiceTierAdjustmentNotice(adjustment.requested, adjustment.applied),
         ) { it.copy(serviceTier = adjustment.applied) }
     }
 
     private fun applyRuntimeApiAdjustment(
         presetId: String?,
+        isSecondary: Boolean,
         notice: String,
         transform: (OpenAIModelConfig) -> OpenAIModelConfig,
     ) {
-        val hadTemporary = _uiState.value.temporaryAi != null
+        val currentState = _uiState.value
+        val isTemporaryTarget = if (isSecondary) {
+            currentState.temporarySecondaryAi != null || currentState.presetSecondaryAi == null
+        } else {
+            currentState.temporaryAi != null
+        }
         update { current ->
-            if (current.temporaryAi != null) {
+            if (isSecondary) {
+                if (current.temporarySecondaryAi != null || current.presetSecondaryAi == null) {
+                    val base = current.temporarySecondaryAi ?: current.lastSecondaryAi
+                    val updatedBase = base?.copy(api = transform(base.api))
+                    current.copy(
+                        temporarySecondaryAi = if (current.temporarySecondaryAi != null) updatedBase else current.temporarySecondaryAi,
+                        lastSecondaryAi = updatedBase ?: current.lastSecondaryAi,
+                        effortNotice = notice,
+                    )
+                } else {
+                    val updatedSettings = applyApiTransformToSecondaryPreset(current.settings, presetId, transform)
+                    val updatedDraft = current.settingsDraft?.let { draft -> applyApiTransformToSecondaryPreset(draft, presetId, transform) }
+                    current.copy(settings = updatedSettings, settingsDraft = updatedDraft, effortNotice = notice)
+                }
+            } else if (current.temporaryAi != null) {
                 current.copy(
                     temporaryAi = current.temporaryAi.copy(api = transform(current.temporaryAi.api)),
                     effortNotice = notice,
@@ -774,14 +939,32 @@ class OpenAIChatViewModel(
                 current.copy(settings = updatedSettings, settingsDraft = updatedDraft, effortNotice = notice)
             }
         }
-        if (hadTemporary) return
+        if (isTemporaryTarget) return
         viewModelScope.launch {
             try {
-                val persisted = applyApiTransformToActivePreset(repository.load(), presetId, transform)
+                val loaded = repository.load()
+                val persisted = if (isSecondary) {
+                    applyApiTransformToSecondaryPreset(loaded, presetId, transform)
+                } else {
+                    applyApiTransformToActivePreset(loaded, presetId, transform)
+                }
                 repository.save(persisted)
             } catch (error: CancellationException) { throw error }
             catch (_: Exception) { }
         }
+    }
+
+    private fun applyApiTransformToSecondaryPreset(
+        settings: AppSettings,
+        presetId: String?,
+        transform: (OpenAIModelConfig) -> OpenAIModelConfig,
+    ): AppSettings {
+        val targetPreset = presetId?.let { id -> settings.presets.find { it.id == id && it.secondaryAi != null } } ?: return settings
+        return settings.copy(presets = settings.presets.map { preset ->
+            if (preset.id == targetPreset.id && preset.secondaryAi != null) {
+                preset.copy(secondaryAi = preset.secondaryAi.copy(api = transform(preset.secondaryAi.api)))
+            } else preset
+        })
     }
 
     private fun applyApiTransformToActivePreset(
@@ -807,6 +990,11 @@ class OpenAIChatViewModel(
         transform: (OpenAIModelConfig) -> OpenAIModelConfig,
     ): AppSettings {
         if (label == "Default AI") return settings.copy(api = transform(settings.api))
+        if (label.endsWith(" (2nd AI)")) {
+            val presetName = label.removeSuffix(" (2nd AI)")
+            val matched = settings.presets.firstOrNull { it.name == presetName && it.secondaryAi != null } ?: return settings
+            return applyApiTransformToSecondaryPreset(settings, matched.id, transform)
+        }
         val matched = settings.presets.firstOrNull { it.name == label && it.customAi != null } ?: return settings
         return applyApiTransformToActivePreset(settings, matched.id, transform)
     }
@@ -842,6 +1030,7 @@ internal fun settingsError(settings: AppSettings): String? {
     settings.presets.forEach { preset ->
         if (preset.name.isBlank() || preset.prompt.isBlank()) return "Each preset needs a name and prompt."
         preset.customAi?.let { ai -> aiError(settings, ai)?.let { return "${preset.name}: $it" } }
+        preset.secondaryAi?.let { ai -> aiError(settings, ai)?.let { return "${preset.name} (2nd AI): $it" } }
     }
     return null
 }

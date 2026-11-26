@@ -56,6 +56,7 @@ data class PromptPreset(
     val name: String,
     val prompt: String,
     val customAi: AiConfiguration? = null,
+    val secondaryAi: AiConfiguration? = null,
     val attachScreenshot: Boolean? = null,
 )
 
@@ -137,9 +138,13 @@ fun AppSettings.resolve(ai: AiConfiguration): AiConfiguration {
 fun AppSettings.aiFor(presetId: String?): AiConfiguration =
     resolve(presets.find { it.id == presetId }?.customAi ?: defaultAi)
 
+fun AppSettings.secondaryAiFor(presetId: String?): AiConfiguration? =
+    presets.find { it.id == presetId }?.secondaryAi?.let(::resolve)
+
 /** Every resolved configuration, used to find a credential again for chats whose key is not stored. */
 fun AppSettings.credentialSources(): List<OpenAIModelConfig> =
-    (listOf(defaultAi) + presets.mapNotNull { it.customAi }).map { resolve(it).api } + connections.map { OpenAIModelConfig().using(it) }
+    (listOf(defaultAi) + presets.mapNotNull { it.customAi } + presets.mapNotNull { it.secondaryAi }).map { resolve(it).api } +
+        connections.map { OpenAIModelConfig().using(it) }
 
 /**
  * Moves inline endpoints and credentials from older settings into shared connections. Identical endpoints and
@@ -157,11 +162,19 @@ fun AppSettings.withConnections(): AppSettings {
         val name = generateSequence(1) { it + 1 }.map { if (it == 1) base else "$base $it" }.first { candidate -> connections.none { it.name == candidate } }
         return api.asConnection(newId(), name).also { connections += it }.id
     }
+    fun migrateAi(ai: AiConfiguration): AiConfiguration {
+        val id = ai.connectionId ?: adopt(ai.api)
+        return ai.copy(
+            api = (if (ai.connectionId == null) ai.api.using(connection(connections, id)) else ai.api).withoutConnection(),
+            connectionId = id,
+        )
+    }
     val defaultId = connectionId ?: adopt(api)
     val migratedPresets = presets.map { preset ->
-        val ai = preset.customAi ?: return@map preset
-        val id = ai.connectionId ?: adopt(ai.api)
-        preset.copy(customAi = ai.copy(api = (if (ai.connectionId == null) ai.api.using(connection(connections, id)) else ai.api).withoutConnection(), connectionId = id))
+        preset.copy(
+            customAi = preset.customAi?.let(::migrateAi),
+            secondaryAi = preset.secondaryAi?.let(::migrateAi),
+        )
     }
     val defaultApi = if (connectionId == null) api.using(connection(connections, defaultId)) else api
     return copy(api = defaultApi.withoutConnection(), connectionId = defaultId, connections = connections, presets = migratedPresets)
