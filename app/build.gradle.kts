@@ -3,6 +3,18 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val githubRepository = providers.environmentVariable("GITHUB_REPOSITORY")
+    .orElse(
+        providers.exec {
+            commandLine("git", "config", "--get", "remote.origin.url")
+            isIgnoreExitValue = true
+        }.standardOutput.asText.map { remote ->
+            Regex("""github\.com[:/]([^/\s]+/[^/\s]+?)(?:\.git)?$""")
+                .find(remote.trim())?.groupValues?.get(1).orEmpty()
+        },
+    )
+    .getOrElse("")
+
 android {
     namespace = "app.touchai.android"
     compileSdk = 36
@@ -14,6 +26,7 @@ android {
         versionCode = 13
         versionName = "1.3.6"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField("String", "GITHUB_REPOSITORY", "\"${githubRepository.replace("\"", "\\\"")}\"")
     }
 
     signingConfigs {
@@ -38,6 +51,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     compileOptions {

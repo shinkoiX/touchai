@@ -13,12 +13,15 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.launch
 import app.touchai.core.openai.ApiProtocol
 import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.GeminiBaseUrl
@@ -175,7 +178,134 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                     AppIcon(R.drawable.ic_chevron_right, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+            AboutAndUpdatesSection()
         }
+    }
+}
+
+@Composable
+private fun AboutAndUpdatesSection() {
+    val context = LocalContext.current
+    val uriHandler = LocalUriHandler.current
+    val scope = rememberCoroutineScope()
+    var checking by remember { mutableStateOf(false) }
+    var updateResult by remember { mutableStateOf<UpdateCheckResult?>(null) }
+    var updateDialog by remember { mutableStateOf<UpdateCheckResult.UpdateAvailable?>(null) }
+
+    fun checkNow() {
+        if (checking) return
+        val app = context.applicationContext as? TouchAiApplication ?: return
+        checking = true
+        scope.launch {
+            try {
+                val result = app.updateChecker.check()
+                updateResult = result
+                if (result is UpdateCheckResult.UpdateAvailable) updateDialog = result
+            } finally {
+                checking = false
+            }
+        }
+    }
+
+    Column {
+        SectionHeader("About")
+        SettingsGroup {
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(horizontal = 16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Version", style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                Text(
+                    "v${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            HorizontalDivider(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+            )
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clickable(enabled = !checking) {
+                        val available = updateResult as? UpdateCheckResult.UpdateAvailable
+                        if (available != null) updateDialog = available else checkNow()
+                    }
+                    .heightIn(min = 56.dp)
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                if (checking) {
+                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                } else {
+                    AppIcon(
+                        R.drawable.ic_refresh,
+                        null,
+                        tint = if (updateResult is UpdateCheckResult.UpdateAvailable) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Column(Modifier.weight(1f)) {
+                    Text("Check for updates", style = MaterialTheme.typography.bodyLarge)
+                    val (subtitle, subtitleColor) = when (val res = updateResult) {
+                        null -> (if (checking) "Checking GitHub Releases…" else "Check GitHub Releases") to MaterialTheme.colorScheme.onSurfaceVariant
+                        is UpdateCheckResult.UpToDate -> "Up to date (v${res.latestVersion})" to MaterialTheme.colorScheme.onSurfaceVariant
+                        is UpdateCheckResult.UpdateAvailable -> "New version v${res.latestVersion} available" to MaterialTheme.colorScheme.primary
+                        is UpdateCheckResult.Error -> res.message to MaterialTheme.colorScheme.error
+                    }
+                    Text(subtitle, style = MaterialTheme.typography.bodySmall, color = subtitleColor)
+                }
+                if (updateResult is UpdateCheckResult.UpdateAvailable) {
+                    TextButton(onClick = { checkNow() }, enabled = !checking) { Text("Recheck") }
+                } else {
+                    AppIcon(R.drawable.ic_chevron_right, null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+
+    updateDialog?.let { available ->
+        AlertDialog(
+            onDismissRequest = { updateDialog = null },
+            title = { Text("Update available: v${available.latestVersion}") },
+            text = {
+                Column(
+                    modifier = Modifier.heightIn(max = 280.dp).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "Current version: v${BuildConfig.VERSION_NAME}",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        available.releaseNotes ?: "A newer release is available on GitHub.",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    updateDialog = null
+                    uriHandler.openUri(available.apkUrl ?: available.releaseUrl)
+                }) {
+                    Text(if (available.apkUrl != null) "Download APK" else "Open release")
+                }
+            },
+            dismissButton = {
+                Row {
+                    if (available.apkUrl != null && available.apkUrl != available.releaseUrl) {
+                        TextButton(onClick = {
+                            updateDialog = null
+                            uriHandler.openUri(available.releaseUrl)
+                        }) { Text("Release notes") }
+                    }
+                    TextButton(onClick = { updateDialog = null }) { Text("Later") }
+                }
+            },
+        )
     }
 }
 

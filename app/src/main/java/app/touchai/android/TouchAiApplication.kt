@@ -55,6 +55,7 @@ class TouchAiApplication : Application() {
     }
     private val responseClient by lazy { OpenAIModel(httpClient) }
     val modelCatalog by lazy { ApiModelCatalog(httpClient) }
+    val updateChecker by lazy { AppUpdateChecker(httpClient) }
     val chatGptAccounts by lazy { ChatGptAccountManager(ChatGptAccountStore(settingsDataStore, ApiKeyCipher()), ChatGptOAuth(httpClient)) }
     private val chatClient by lazy { ChatGptChatClient(LoggingChatClient(responseClient, requestLogs), chatGptAccounts) }
     val requests by lazy {
