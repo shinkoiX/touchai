@@ -1,0 +1,14 @@
+{
+  "name": "touchai-openui-sync",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@openuidev/intelligent-ui-library": "0.0.3",
+    "@openuidev/lang-core": "1.2.0",
+    "esbuild": "0.28.2",
+    "zod": "^4.0.0"
+  }
+}

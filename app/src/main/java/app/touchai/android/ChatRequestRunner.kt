@@ -1,6 +1,7 @@
 package app.touchai.android
 
 import app.touchai.core.openai.*
+import app.touchai.core.openui.OpenUiAssets
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
@@ -51,6 +52,7 @@ class ChatRequestRunner(
     private val scope: CoroutineScope,
     private val onWorkStarted: () -> Unit,
     private val onIdle: () -> Unit,
+    private val openUiPromptProvider: suspend () -> String? = { null },
 ) {
     private val mutableActive = MutableStateFlow<Map<String, ActiveChatRequest>>(emptyMap())
     val active = mutableActive.asStateFlow()
@@ -204,7 +206,18 @@ class ChatRequestRunner(
                 }
             } + turn.user
             execution.creationStarted = true
-            client.stream(turn.ai.api, OpenAIRequest(messages, turn.ai.instructions, purpose, turn.presetName,
+            val openUiPrompt = openUiPromptProvider()
+            val effectiveInstructions = if (openUiPrompt != null) {
+                OpenUiAssets.mergeInstructions(
+                    userInstructions = turn.ai.instructions,
+                    openUiSystemPrompt = openUiPrompt,
+                    enabled = true,
+                    webSearchEnabled = turn.ai.api.webSearch,
+                )
+            } else {
+                turn.ai.instructions
+            }
+            client.stream(turn.ai.api, OpenAIRequest(messages, effectiveInstructions, purpose, turn.presetName,
                 resumeResponseId = if (purpose == RequestPurpose.Resume) turn.responseId else null)).collect { event ->
                 when (event) {
                     is OpenAIStreamEvent.ThinkingStarted -> update(handle, nodeId) {

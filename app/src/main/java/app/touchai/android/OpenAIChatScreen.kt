@@ -70,6 +70,9 @@ import app.touchai.core.markdown.findHighlightRanges
 import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.OpenAIImage
 import app.touchai.core.openai.wireServiceTier
+import app.touchai.core.openui.OpenUiDetector
+import app.touchai.core.openui.OpenUiMessage
+import kotlinx.serialization.json.JsonElement
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -324,6 +327,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                             onActiveMatchPositioned = reportActivePosition,
                         )
                         AssistantMessage(
+                            sessionKey = "${state.chatId}:${branch?.nodeId ?: index}",
                             turn = turn,
                             canRetry = !state.activePaneIsStreaming,
                             onRetry = { viewModel.retry(turnIndex = index) },
@@ -333,6 +337,11 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                             canSwitchBranch = !state.activePaneIsStreaming,
                             onPreviousBranch = { viewModel.switchBranch(index, -1) },
                             onNextBranch = { viewModel.switchBranch(index, 1) },
+                            onOpenUiToAssistant = { msg, ctx ->
+                                followOutput = true
+                                keyboard?.hide()
+                                viewModel.submitFromOpenUi(msg, ctx)
+                            },
                             highlightTerms = searchTerms,
                             activeMatch = turnActiveMatch?.takeIf { it.section != SearchMatchSection.User },
                             onActiveMatchPositioned = reportActivePosition,
@@ -790,6 +799,7 @@ private fun SentImage(image: OpenAIImage, description: String = "Attached image"
 
 @Composable
 private fun AssistantMessage(
+    sessionKey: String,
     turn: ChatTurn,
     canRetry: Boolean,
     onRetry: () -> Unit,
@@ -799,6 +809,7 @@ private fun AssistantMessage(
     canSwitchBranch: Boolean,
     onPreviousBranch: () -> Unit,
     onNextBranch: () -> Unit,
+    onOpenUiToAssistant: (message: String, context: JsonElement?) -> Unit,
     highlightTerms: List<String> = emptyList(),
     activeMatch: ChatSearchMatch? = null,
     onActiveMatchPositioned: ((coords: LayoutCoordinates, yOffsetPx: Float) -> Unit)? = null,
@@ -862,17 +873,49 @@ private fun AssistantMessage(
             CircularProgressIndicator(Modifier.padding(vertical = 4.dp).size(18.dp), strokeWidth = 2.dp)
         }
         if (turn.answer.isNotEmpty()) {
+            val openUiProgram = remember(turn.answer) { OpenUiDetector.extractProgram(turn.answer) }
+            val streamingOpenUiPrefix = remember(turn.answer, turn.status, openUiProgram) {
+                turn.status == TurnStatus.Streaming && openUiProgram == null && OpenUiDetector.looksLikeStreamingOpenUi(turn.answer)
+            }
+            val app = context.applicationContext as? TouchAiApplication
             val markdown = remember(turn.answer, turn.citations) { citationMarkdown(turn.answer, turn.citations) }
             val answerMatch = activeMatch?.takeIf { it.section == SearchMatchSection.Answer }
-            SelectionContainer {
-                StreamingMarkdown(
-                    text = markdown,
-                    isStreaming = turn.status == TurnStatus.Streaming,
-                    modifier = Modifier.fillMaxWidth(),
-                    highlightTerms = highlightTerms,
-                    activeMatchOffset = answerMatch?.start,
-                    onActiveMatchPositioned = onActiveMatchPositioned,
-                )
+            when {
+                openUiProgram != null && app != null && highlightTerms.isEmpty() -> {
+                    OpenUiMessage(
+                        sessionId = sessionKey,
+                        program = openUiProgram,
+                        isStreaming = turn.status == TurnStatus.Streaming,
+                        engine = app.openUiEngine,
+                        onOpenUrl = { url -> runCatching { uriHandler.openUri(url) } },
+                        onToAssistant = onOpenUiToAssistant,
+                        modifier = Modifier.fillMaxWidth(),
+                        fallbackContent = {
+                            SelectionContainer {
+                                StreamingMarkdown(
+                                    text = markdown,
+                                    isStreaming = turn.status == TurnStatus.Streaming,
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
+                        },
+                    )
+                }
+                streamingOpenUiPrefix -> {
+                    CircularProgressIndicator(Modifier.padding(vertical = 4.dp).size(18.dp), strokeWidth = 2.dp)
+                }
+                else -> {
+                    SelectionContainer {
+                        StreamingMarkdown(
+                            text = markdown,
+                            isStreaming = turn.status == TurnStatus.Streaming,
+                            modifier = Modifier.fillMaxWidth(),
+                            highlightTerms = highlightTerms,
+                            activeMatchOffset = answerMatch?.start,
+                            onActiveMatchPositioned = onActiveMatchPositioned,
+                        )
+                    }
+                }
             }
         }
         turn.generatedImages.forEach { output -> key(output.id) { SentImage(output.image, "Generated image") } }

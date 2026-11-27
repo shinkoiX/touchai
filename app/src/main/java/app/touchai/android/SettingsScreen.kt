@@ -101,6 +101,18 @@ fun SettingsScreen(state: OpenAIChatUiState, runtime: QuickAccessRuntime, onSave
                     TestButton(state.testingConnection) { onTest(draft.resolve(draft.defaultAi), "Default AI") }
                 }
             }
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                SectionHeader("Intelligent UI", Modifier.padding(bottom = 0.dp))
+                SettingsGroup {
+                    SwitchRow("Intelligent UI (OpenUI)", draft.intelligentUi, { onDraftChange(draft.copy(intelligentUi = it)) })
+                    Text(
+                        "Render rich cards, side-by-side media rows, SVG diagrams, charts, and interactive tools natively using the official OpenUI prompt.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                    )
+                }
+            }
             Column {
                 SectionHeader("Image size")
                 Choices(ImageQuality.entries, { it == draft.imageQuality }, { it.label }) { onDraftChange(draft.copy(imageQuality = it)) }

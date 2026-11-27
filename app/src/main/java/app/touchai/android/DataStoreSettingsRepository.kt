@@ -58,6 +58,7 @@ class DataStoreSettingsRepository(
             lastPresetId = prefs[LastPreset]?.takeIf(String::isNotEmpty) ?: if (prefs.contains(LastPreset)) null else defaults.lastPresetId,
             imageQuality = prefs[Quality]?.let(ImageQuality::valueOf) ?: defaults.imageQuality,
             imageLimit = prefs[ImageLimit] ?: defaults.imageLimit,
+            intelligentUi = prefs[IntelligentUi] ?: defaults.intelligentUi,
             quickAccess = readQuickAccess(prefs),
         ).withConnections()
     }
@@ -91,6 +92,7 @@ class DataStoreSettingsRepository(
             if (saved.presets.none { it.id == selected }) prefs[LastPreset] = ""
             prefs[Quality] = saved.imageQuality.name
             prefs[ImageLimit] = saved.imageLimit
+            prefs[IntelligentUi] = saved.intelligentUi
             prefs[FloatingButton] = saved.quickAccess.floatingButton
             prefs[CornerSwipe] = saved.quickAccess.cornerSwipe
             prefs[GestureCornerPosition] = saved.quickAccess.gestureCorner.name
@@ -244,6 +246,7 @@ class DataStoreSettingsRepository(
         val LastPreset = stringPreferencesKey("default_preset")
         val Quality = stringPreferencesKey("image_quality")
         val ImageLimit = intPreferencesKey("image_limit")
+        val IntelligentUi = booleanPreferencesKey("intelligent_ui")
         val FloatingButton = booleanPreferencesKey("floating_button")
         val CornerSwipe = booleanPreferencesKey("corner_swipe")
         val GestureCornerPosition = stringPreferencesKey("gesture_corner")

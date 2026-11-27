@@ -19,3 +19,4 @@ rootProject.name = "TouchAI"
 include(":app")
 include(":core:markdown")
 include(":core:openai")
+include(":core:openui")

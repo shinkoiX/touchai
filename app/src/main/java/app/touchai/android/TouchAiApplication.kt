@@ -10,6 +10,8 @@ import app.touchai.core.openai.ApiModelCatalog
 import app.touchai.core.openai.OpenAIModel
 import app.touchai.core.openai.LoggingChatClient
 import app.touchai.core.openai.ChatGptOAuth
+import app.touchai.core.openui.OpenUiAssets
+import app.touchai.core.openui.OpenUiEngine
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.HttpTimeout
@@ -24,6 +26,8 @@ class TouchAiApplication : Application() {
     val quickAccess by lazy { QuickAccessRuntime(this, settingsRepository) }
     val requestLogs by lazy { RequestLogStore(this) }
     val chatHistory by lazy { ChatHistoryStore(File(filesDir, "chats"), ApiKeyCipher()) }
+    val openUiEngine by lazy { OpenUiEngine(bundleProvider = { OpenUiAssets.loadHeadlessBundle(this) }) }
+    private val openUiSystemPrompt by lazy { OpenUiAssets.loadSystemPrompt(this) }
     internal val chatSessionTransfer = ChatSessionTransfer()
     internal val collapsedChatSession = ChatSessionTransfer()
 
@@ -61,7 +65,10 @@ class TouchAiApplication : Application() {
     val requests by lazy {
         ChatRequestRunner(chatHistory, chatClient, responseClient::cancelResponse, requestScope,
             onWorkStarted = { RequestService.start(this) },
-            onIdle = { stopService(Intent(this, RequestService::class.java)) })
+            onIdle = { stopService(Intent(this, RequestService::class.java)) },
+            openUiPromptProvider = {
+                if (settingsRepository.load().intelligentUi) openUiSystemPrompt else null
+            })
     }
 
     fun restorePendingRequests() { requestScope.launch { requests.restorePending() } }

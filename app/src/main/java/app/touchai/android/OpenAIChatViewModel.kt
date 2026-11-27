@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonElement
 
 enum class TurnStatus { Streaming, Recovering, Cancelling, Completed, Stopped, Interrupted, Incomplete, Failed }
 
@@ -697,7 +698,10 @@ class OpenAIChatViewModel(
                 cancelRemovedImages(images)
                 update { current ->
                     val selected = current.selectedPreset?.takeIf { id -> saved.presets.any { it.id == id } }
-                    val conversationChanged = saved.copy(imageLimit = current.settings.imageLimit) != current.settings
+                    val conversationChanged = saved.copy(
+                        imageLimit = current.settings.imageLimit,
+                        intelligentUi = current.settings.intelligentUi,
+                    ) != current.settings
                     current.copy(settings = saved, ready = true, settingsOpen = false, settingsDraft = null,
                         temporaryAi = null, temporaryDualMode = null, temporarySecondaryAi = null,
                         chatTree = if (conversationChanged) ChatTree() else current.chatTree,
@@ -763,6 +767,23 @@ class OpenAIChatViewModel(
             catch (error: Exception) { reportError("$label: ${error.message}") }
             finally { update { it.copy(testingConnection = false) } }
         }
+    }
+
+    fun submitFromOpenUi(message: String, context: JsonElement? = null) {
+        val text = buildString {
+            append(message.trim())
+            if (context != null) {
+                val ctxText = context.toString()
+                if (ctxText.isNotBlank() && ctxText != "{}" && ctxText != "null") {
+                    if (isNotEmpty()) append("\n\n")
+                    append("context and form values: ")
+                    append(ctxText)
+                }
+            }
+        }.trim()
+        if (text.isEmpty()) return
+        setPrompt(text)
+        submit()
     }
 
     fun submit() {

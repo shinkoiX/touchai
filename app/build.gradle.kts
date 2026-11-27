@@ -67,6 +67,7 @@ kotlin {
 dependencies {
     implementation(project(":core:markdown"))
     implementation(project(":core:openai"))
+    implementation(project(":core:openui"))
 
     implementation(platform(libs.androidx.compose.bom))
     implementation(libs.androidx.activity.compose)

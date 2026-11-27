@@ -121,6 +121,7 @@ data class AppSettings(
     val lastPresetId: String? = "explain",
     val imageQuality: ImageQuality = ImageQuality.Balanced,
     val imageLimit: Int = 3,
+    val intelligentUi: Boolean = true,
     val quickAccess: QuickAccessSettings = QuickAccessSettings(),
 )
 
