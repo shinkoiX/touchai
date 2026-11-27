@@ -42,18 +42,32 @@ fun ChatGptAccountConfiguration(accountId: String?, onChange: (String) -> Unit) 
         catch (failure: Exception) { if (failure is CancellationException) throw failure; accountMessage = "Could not load ChatGPT accounts." }
     }
     if (accounts.isNotEmpty()) Box {
-        OutlinedButton(onClick = { accountMenu = true }, enabled = !signingOut, modifier = Modifier.fillMaxWidth()) {
-            Text(account?.let { it.label + if (it.tokens == null) " · Signed out" else "" } ?: "Select ChatGPT account")
-        }
-        DropdownMenu(accountMenu, { accountMenu = false }) {
-            accounts.forEach { candidate -> DropdownMenuItem(text = { Text(candidate.label + if (candidate.tokens == null) " · Signed out" else "") }, onClick = {
-                accountMenu = false
-                if (candidate.id != accountId) onChange(candidate.id)
-            }) }
+        AppPickerButton(
+            title = account?.let { it.label + if (it.tokens == null) " · Signed out" else "" } ?: "Select ChatGPT account",
+            onClick = { accountMenu = true },
+            enabled = !signingOut,
+        )
+        DropdownMenu(
+            expanded = accountMenu,
+            onDismissRequest = { accountMenu = false },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+        ) {
+            accounts.forEach { candidate ->
+                DropdownMenuItem(
+                    text = { Text(candidate.label + if (candidate.tokens == null) " · Signed out" else "") },
+                    onClick = {
+                        accountMenu = false
+                        if (candidate.id != accountId) onChange(candidate.id)
+                    },
+                )
+            }
         }
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        OutlinedButton(onClick = { launchSignIn(account?.id) }, enabled = !signingOut) { Text("Continue with ChatGPT") }
+        AppTonalButton(onClick = { launchSignIn(account?.id) }, enabled = !signingOut) {
+            Text("Continue with ChatGPT", style = MaterialTheme.typography.labelLarge)
+        }
         if (account != null) TextButton(onClick = { launchSignIn(null) }, enabled = !signingOut) { Text("Add account") }
     }
     if (account?.tokens != null) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

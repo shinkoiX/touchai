@@ -552,7 +552,12 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                             if (loadingImage || state.capturingScreenshot) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                             else AppIcon(R.drawable.ic_add, "Attach image", size = 21.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        if (attachmentMenuOpen) DropdownMenu(expanded = true, onDismissRequest = { attachmentMenuOpen = false }) {
+                        if (attachmentMenuOpen) DropdownMenu(
+                            expanded = true,
+                            onDismissRequest = { attachmentMenuOpen = false },
+                            containerColor = MaterialTheme.colorScheme.surface,
+                            shape = RoundedCornerShape(16.dp),
+                        ) {
                             DropdownMenuItem(text = { Text("Attach screenshot") }, onClick = {
                                 attachmentMenuOpen = false
                                 viewModel.attachScreenshot(captureScreenshot)
@@ -592,7 +597,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                                     Text(
                                         text = "Ask anything",
                                         style = inputTextStyle,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
                                     )
                                 }
                                 innerTextField()
@@ -811,7 +816,7 @@ private fun PresetChip(label: String, selected: Boolean, enabled: Boolean, isDua
     val fg = when {
         selected -> scheme.onPrimary
         !enabled -> scheme.onSurfaceVariant.copy(alpha = 0.45f)
-        else -> scheme.onSurfaceVariant
+        else -> scheme.onSurface
     }
     Surface(
         onClick = onClick,
@@ -1224,7 +1229,7 @@ private fun AssistantMessage(
                 Text(
                     text = footerMeta,
                     style = MaterialTheme.typography.labelSmall,
-                    color = muted.copy(alpha = 0.65f),
+                    color = muted,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -1281,7 +1286,7 @@ private fun PairedConversationTabsBar(
                             text = displayAi.api.model.ifBlank { "Model $slotTag" },
                             style = MaterialTheme.typography.labelLarge,
                             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Medium,
-                            color = if (isSelected) scheme.primary else scheme.onSurfaceVariant,
+                            color = if (isSelected) scheme.primary else scheme.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f, fill = false),
@@ -1426,7 +1431,7 @@ private fun ReasoningSection(
                             text = trimmed,
                             isStreaming = activelyThinking,
                             modifier = Modifier.fillMaxWidth(),
-                            textColor = muted.copy(alpha = 0.9f),
+                            textColor = muted,
                             fontSize = 13.sp,
                             lineHeight = 20.sp,
                             highlightTerms = highlightTerms,
@@ -1448,8 +1453,8 @@ private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, attach
         Box {
             Image(remember(bitmap) { bitmap.asImageBitmap() }, "Image preview",
                 Modifier.heightIn(min = 96.dp, max = maxHeight).widthIn(min = 96.dp)
-                    .clip(shape).background(MaterialTheme.colorScheme.surfaceContainer)
-                    .border(BorderStroke(if (attached) 2.dp else 1.dp, if (attached) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant), shape)
+                    .clip(shape).background(MaterialTheme.colorScheme.surfaceContainerLow)
+                    .then(if (attached) Modifier.border(BorderStroke(2.dp, MaterialTheme.colorScheme.primary), shape) else Modifier)
                     .clickable(onClick = onToggle).semantics {
                         contentDescription = "Image preview"
                         selected = attached

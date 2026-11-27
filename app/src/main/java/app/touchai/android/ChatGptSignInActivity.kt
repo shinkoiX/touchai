@@ -6,6 +6,7 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.layout.*
@@ -13,6 +14,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.core.net.toUri
@@ -31,6 +33,7 @@ class ChatGptSignInActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        enableEdgeToEdge()
         if (intent.action == CancelSignIn) { finish(); return }
         setContent {
             TouchAiTheme {
@@ -53,12 +56,12 @@ class ChatGptSignInActivity : ComponentActivity() {
                         finish()
                     }
                 }
-                Surface(Modifier.fillMaxSize()) {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing).padding(24.dp),
-                        verticalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterVertically), horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Continue with ChatGPT", style = MaterialTheme.typography.headlineSmall)
+                        verticalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterVertically), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Continue with ChatGPT", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                         if (model.error == null) {
-                            CircularProgressIndicator()
+                            CircularProgressIndicator(strokeWidth = 2.dp)
                         } else Text(model.error!!, color = MaterialTheme.colorScheme.error)
                         TextButton(onClick = { finish() }) { Text(if (model.error == null) "Cancel" else "Close") }
                     }

@@ -242,7 +242,7 @@ internal fun OpenUiLabel(element: OpenUiElement, modifier: Modifier = Modifier) 
         text = text,
         style = MaterialTheme.typography.labelLarge,
         fontWeight = FontWeight.Medium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        color = MaterialTheme.colorScheme.onSurface,
         modifier = modifier,
     )
 }
@@ -383,9 +383,8 @@ internal fun OpenUiList(
                         val descAnnotated = remember(description, scheme) { parseInlineMarkdown(description, scheme) }
                         Text(
                             text = descAnnotated,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = scheme.onSurfaceVariant,
-                            lineHeight = 20.sp,
+                            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.5.sp, lineHeight = 22.sp),
+                            color = scheme.onSurface,
                         )
                     }
                     children.forEach { child -> RenderOpenUiElement(child, ctx) }
@@ -406,7 +405,11 @@ internal fun OpenUiListItemStandalone(
     val children = element.props.elementListProp("children")
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         if (title.isNotBlank()) Text(title, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
-        if (!desc.isNullOrBlank()) Text(desc, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (!desc.isNullOrBlank()) Text(
+            desc,
+            style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.5.sp, lineHeight = 22.sp),
+            color = MaterialTheme.colorScheme.onSurface,
+        )
         children.forEach { RenderOpenUiElement(it, ctx) }
     }
 }
@@ -451,7 +454,7 @@ internal fun OpenUiQuote(element: OpenUiElement, modifier: Modifier = Modifier) 
             Text(
                 text = annotated,
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.5.sp, lineHeight = 23.sp),
-                color = scheme.onSurface.copy(alpha = 0.88f),
+                color = scheme.onSurface,
             )
             if (!cite.isNullOrBlank()) {
                 Text(

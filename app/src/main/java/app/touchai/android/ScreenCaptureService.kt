@@ -175,13 +175,12 @@ class ScreenCaptureService : AccessibilityService() {
         val handle = FrameLayout(this).apply {
             contentDescription = "Restore chat"
             background = GradientDrawable().apply {
-                setColor(Color.rgb(246, 242, 252))
+                setColor(Color.rgb(238, 245, 255))
                 cornerRadius = dp(24).toFloat()
-                setStroke(dp(1), Color.rgb(200, 197, 208))
             }
             addView(View(this@ScreenCaptureService).apply {
                 background = GradientDrawable().apply {
-                    setColor(Color.rgb(79, 70, 229))
+                    setColor(Color.rgb(63, 127, 232))
                     cornerRadius = dp(2).toFloat()
                 }
             }, FrameLayout.LayoutParams(dp(32), dp(4), Gravity.CENTER))
@@ -220,11 +219,11 @@ class ScreenCaptureService : AccessibilityService() {
             imageTintList = ColorStateList.valueOf(Color.WHITE)
             scaleType = ImageView.ScaleType.FIT_CENTER
             contentDescription = getString(R.string.floating_button_description)
-            background = GradientDrawable(GradientDrawable.Orientation.TL_BR, intArrayOf(Color.rgb(123, 108, 255), Color.rgb(52, 36, 196))).apply {
+            background = GradientDrawable().apply {
                 shape = GradientDrawable.OVAL
-                setStroke(dp(1), Color.argb(90, 255, 255, 255))
+                setColor(Color.rgb(63, 127, 232))
             }
-            elevation = dp(6).toFloat()
+            elevation = dp(2).toFloat()
             outlineProvider = ViewOutlineProvider.BACKGROUND
             setOnClickListener { if (!capturing) startActivity(CaptureActivity.intent(this@ScreenCaptureService)) }
         }

@@ -56,7 +56,7 @@ fun openUiColor(
     return when (key) {
         "ink" -> scheme.onSurface
         "muted" -> scheme.onSurfaceVariant
-        "faint" -> scheme.onSurfaceVariant.copy(alpha = 0.72f)
+        "faint" -> scheme.onSurfaceVariant.copy(alpha = 0.85f)
         "surface" -> if (asBackground) scheme.surfaceContainerLow else scheme.surfaceContainerHigh
         "neutral" -> if (asBackground) scheme.surfaceContainerLow else scheme.onSurfaceVariant
         "primary" -> if (asBackground) scheme.primaryContainer else scheme.primary

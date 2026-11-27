@@ -61,8 +61,8 @@ internal class CornerSwipeView(context: Context, private val onTap: (Float, Floa
         layoutDirection = LAYOUT_DIRECTION_LTR
         background = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
-            setColor(Color.rgb(246, 242, 252))
-            setStroke(dp(1), Color.rgb(79, 70, 229))
+            cornerRadius = dp(12).toFloat()
+            setColor(Color.rgb(238, 245, 255))
         }
         setOnClickListener {
             performHapticFeedback(HapticFeedbackConstants.CONFIRM)
@@ -71,7 +71,7 @@ internal class CornerSwipeView(context: Context, private val onTap: (Float, Floa
         addView(marker.apply {
             setImageResource(R.drawable.ic_arrow_up)
             rotation = 45f
-            imageTintList = ColorStateList.valueOf(Color.rgb(79, 70, 229))
+            imageTintList = ColorStateList.valueOf(Color.rgb(63, 127, 232))
             setPadding(dp(5), dp(5), dp(5), dp(5))
             importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
         }, LayoutParams(dp(28), dp(28), Gravity.CENTER))

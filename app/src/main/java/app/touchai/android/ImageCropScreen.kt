@@ -7,6 +7,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.listSaver
@@ -37,19 +39,34 @@ import kotlin.math.roundToInt
 fun ImageCropScreen(bitmap: Bitmap, initialCrop: ImageCrop, onApply: (ImageCrop) -> Unit, onCancel: () -> Unit) {
     var crop by rememberSaveable(bitmap, stateSaver = CropSaver) { mutableStateOf(initialCrop) }
     BackHandler { onCancel() }
-    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .windowInsetsPadding(WindowInsets.safeDrawing),
+    ) {
         AppTopBar("Crop", navigation = { AppIconButton(R.drawable.ic_close, "Cancel", onCancel) }) {
-            Button(onClick = { onApply(crop) }, modifier = Modifier.padding(end = 8.dp)) {
+            Button(
+                onClick = { onApply(crop) },
+                shape = CircleShape,
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
+                modifier = Modifier.padding(end = 8.dp),
+            ) {
                 AppIcon(R.drawable.ic_check, null, size = 18.dp)
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
                 Text("Apply")
             }
         }
-        CropEditor(bitmap, crop, { crop = it }, Modifier.weight(1f).fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp), enabled = true)
+        CropEditor(
+            bitmap,
+            crop,
+            { crop = it },
+            Modifier.weight(1f).fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+            enabled = true,
+        )
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun CropEditor(bitmap: Bitmap, crop: ImageCrop, onCrop: (ImageCrop) -> Unit, modifier: Modifier, enabled: Boolean) {
     var viewport by remember { mutableStateOf(IntSize.Zero) }
@@ -76,57 +93,72 @@ private fun CropEditor(bitmap: Bitmap, crop: ImageCrop, onCrop: (ImageCrop) -> U
         val y = ((rect.height - (viewport.height - 2f * gutter)) / 2f).coerceAtLeast(0f)
         return Offset(value.x.coerceIn(-x, x), value.y.coerceIn(-y, y))
     }
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            SingleChoiceSegmentedButtonRow(Modifier.weight(1f)) {
-                SegmentedButton(!panMode, { panMode = false }, SegmentedButtonDefaults.itemShape(0, 2), enabled = enabled,
-                    icon = { AppIcon(R.drawable.ic_crop, null, size = 18.dp) }) { Text("Crop") }
-                SegmentedButton(panMode, { panMode = true }, SegmentedButtonDefaults.itemShape(1, 2), enabled = enabled,
-                    icon = { AppIcon(R.drawable.ic_pan, null, size = 18.dp) }) { Text("Move") }
-            }
-            TextButton(onClick = { zoom = 1f; pan = Offset.Zero; onCrop(ImageCrop.Full) }, enabled = enabled, modifier = Modifier.padding(start = 8.dp)) { Text("Reset") }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            AppSegmentBar(
+                options = listOf(false, true),
+                selected = { it == panMode },
+                label = { if (it) "Move" else "Crop" },
+                enabled = enabled,
+                icon = { isMove -> AppIcon(if (isMove) R.drawable.ic_pan else R.drawable.ic_crop, null, size = 16.dp) },
+                modifier = Modifier.weight(1f),
+                onSelect = { panMode = it },
+            )
+            TextButton(onClick = { zoom = 1f; pan = Offset.Zero; onCrop(ImageCrop.Full) }, enabled = enabled) { Text("Reset") }
         }
-        Canvas(Modifier.weight(1f).fillMaxWidth().clip(MaterialTheme.shapes.large).background(MaterialTheme.colorScheme.surfaceContainerHighest).clipToBounds().onSizeChanged { viewport = it }
-            .semantics { contentDescription = "Crop selection" }
-            .pointerInput(bitmap, panMode, enabled) {
-                if (!enabled) return@pointerInput
-                if (panMode) {
-                    detectTransformGestures { centroid, panChange, zoomChange, _ ->
-                        val old = bounds()
-                        val imagePoint = Offset((centroid.x - old.left) / old.width, (centroid.y - old.top) / old.height)
-                        zoom = (zoom * zoomChange).coerceIn(1f, 4f)
-                        val next = bounds()
-                        val origin = centroid - Offset(imagePoint.x * next.width, imagePoint.y * next.height) + panChange
-                        pan = constrainPan(origin - Offset((viewport.width - next.width) / 2f, (viewport.height - next.height) / 2f))
+        Canvas(
+            Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(20.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                .clipToBounds()
+                .onSizeChanged { viewport = it }
+                .semantics { contentDescription = "Crop selection" }
+                .pointerInput(bitmap, panMode, enabled) {
+                    if (!enabled) return@pointerInput
+                    if (panMode) {
+                        detectTransformGestures { centroid, panChange, zoomChange, _ ->
+                            val old = bounds()
+                            val imagePoint = Offset((centroid.x - old.left) / old.width, (centroid.y - old.top) / old.height)
+                            zoom = (zoom * zoomChange).coerceIn(1f, 4f)
+                            val next = bounds()
+                            val origin = centroid - Offset(imagePoint.x * next.width, imagePoint.y * next.height) + panChange
+                            pan = constrainPan(origin - Offset((viewport.width - next.width) / 2f, (viewport.height - next.height) / 2f))
+                        }
+                    } else {
+                        var handle: CropHandle? = null
+                        var start = Offset.Zero
+                        var dragCrop = currentCrop
+                        detectDragGestures(orientationLock = null, onDragStart = { down, _, _ ->
+                            val point = down.position
+                            val rect = bounds()
+                            val selection = currentCrop
+                            dragCrop = selection
+                            start = normalized(point)
+                            handle = selection.hitHandle(point.x - rect.left, point.y - rect.top, rect.width, rect.height, 28.dp.toPx())
+                        }) { change, amount ->
+                            change.consume()
+                            val rect = bounds()
+                            val activeHandle = handle
+                            dragCrop = if (activeHandle != null) dragCrop.drag(activeHandle, amount.x / rect.width, amount.y / rect.height)
+                            else normalized(change.position).let { cropBetween(start.x, start.y, it.x, it.y) }
+                            onCrop(dragCrop)
+                        }
                     }
-                } else {
-                    var handle: CropHandle? = null
-                    var start = Offset.Zero
-                    var dragCrop = currentCrop
-                    detectDragGestures(orientationLock = null, onDragStart = { down, _, _ ->
-                        val point = down.position
-                        val rect = bounds()
-                        val selection = currentCrop
-                        dragCrop = selection
-                        start = normalized(point)
-                        handle = selection.hitHandle(point.x - rect.left, point.y - rect.top, rect.width, rect.height, 28.dp.toPx())
-                    }) { change, amount ->
-                        change.consume()
-                        val rect = bounds()
-                        val activeHandle = handle
-                        dragCrop = if (activeHandle != null) dragCrop.drag(activeHandle, amount.x / rect.width, amount.y / rect.height)
-                        else normalized(change.position).let { cropBetween(start.x, start.y, it.x, it.y) }
-                        onCrop(dragCrop)
-                    }
-                }
-            }) {
+                },
+        ) {
             val rect = bounds()
             val offset = IntOffset(rect.left.roundToInt(), rect.top.roundToInt())
             val imageSize = IntSize(rect.width.roundToInt().coerceAtLeast(1), rect.height.roundToInt().coerceAtLeast(1))
             drawImage(image, dstOffset = offset, dstSize = imageSize)
             drawRect(Color.Black.copy(alpha = 0.55f))
-            val selection = Rect(rect.left + crop.left * rect.width, rect.top + crop.top * rect.height,
-                rect.left + crop.right * rect.width, rect.top + crop.bottom * rect.height)
+            val selection = Rect(
+                rect.left + crop.left * rect.width,
+                rect.top + crop.top * rect.height,
+                rect.left + crop.right * rect.width,
+                rect.top + crop.bottom * rect.height,
+            )
             clipRect(selection.left, selection.top, selection.right, selection.bottom) { drawImage(image, dstOffset = offset, dstSize = imageSize) }
             drawRect(Color.White, selection.topLeft, selection.size, style = Stroke(2.dp.toPx()))
             listOf(selection.topLeft, selection.topRight, selection.bottomLeft, selection.bottomRight).forEach {
@@ -150,6 +182,8 @@ private fun CropEditor(bitmap: Bitmap, crop: ImageCrop, onCrop: (ImageCrop) -> U
     }
 }
 
-private val CropSaver = listSaver<ImageCrop, Float>(save = { listOf(it.left, it.top, it.right, it.bottom) },
-    restore = { ImageCrop(it[0], it[1], it[2], it[3]) })
+private val CropSaver = listSaver<ImageCrop, Float>(
+    save = { listOf(it.left, it.top, it.right, it.bottom) },
+    restore = { ImageCrop(it[0], it[1], it[2], it[3]) },
+)
 private val PanSaver = listSaver<Offset, Float>(save = { listOf(it.x, it.y) }, restore = { Offset(it[0], it[1]) })

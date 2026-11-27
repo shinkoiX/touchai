@@ -487,7 +487,7 @@ internal fun OpenUiSegmentedControl(
                         text = option.label,
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        color = if (selected) scheme.primary else scheme.onSurfaceVariant,
+                        color = if (selected) scheme.primary else scheme.onSurface,
                         maxLines = 1,
                         modifier = Modifier.padding(horizontal = 4.dp, vertical = 9.dp),
                     )

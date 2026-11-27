@@ -1,10 +1,14 @@
 package app.touchai.android
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.*
@@ -12,6 +16,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -47,52 +52,88 @@ fun ChatHistoryScreen(
     val highlightColor = MaterialTheme.colorScheme.primary
     val busy = state.historyLoading || state.historySearching
 
-    Column(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.safeDrawing)) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .windowInsetsPadding(WindowInsets.safeDrawing),
+    ) {
         AppTopBar("Chat history", navigation = { AppIconButton(R.drawable.ic_back, "Back", onClose, enabled = !state.historyTransferring) }) {
             AppIconButton(R.drawable.ic_refresh, "Refresh", onRefresh, enabled = !state.historyLoading)
             AppIconButton(R.drawable.ic_add, "New chat", onNew, enabled = !state.historyLoading)
             Box {
                 AppIconButton(R.drawable.ic_more, "History options", { menuOpen = true }, enabled = !state.historyLoading)
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                    DropdownMenuItem(text = { Text("Export history") }, enabled = state.historyEntries.isNotEmpty() || state.historyQuery.isNotBlank(),
-                        onClick = { menuOpen = false; onExport() })
+                DropdownMenu(
+                    expanded = menuOpen,
+                    onDismissRequest = { menuOpen = false },
+                    containerColor = MaterialTheme.colorScheme.surface,
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Export history") },
+                        enabled = state.historyEntries.isNotEmpty() || state.historyQuery.isNotBlank(),
+                        onClick = { menuOpen = false; onExport() },
+                    )
                     DropdownMenuItem(text = { Text("Import history") }, onClick = { menuOpen = false; onImport() })
                 }
             }
         }
         Surface(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, bottom = 8.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 10.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
             shape = CircleShape,
         ) {
-            Row(Modifier.padding(start = 16.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                AppIcon(R.drawable.ic_search, null, size = 20.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                TextField(
+            Row(
+                Modifier.fillMaxWidth().heightIn(min = 44.dp).padding(start = 16.dp, end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                AppIcon(R.drawable.ic_search, null, size = 19.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                val searchStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface)
+                BasicTextField(
                     value = state.historyQuery,
                     onValueChange = onSearchChange,
-                    placeholder = { Text("Search chats") },
                     singleLine = true,
                     enabled = !state.historyTransferring,
-                    modifier = Modifier.weight(1f),
-                    colors = TextFieldDefaults.colors(
-                        focusedContainerColor = Color.Transparent,
-                        unfocusedContainerColor = Color.Transparent,
-                        disabledContainerColor = Color.Transparent,
-                        focusedIndicatorColor = Color.Transparent,
-                        unfocusedIndicatorColor = Color.Transparent,
-                        disabledIndicatorColor = Color.Transparent,
-                    ),
+                    textStyle = searchStyle,
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                     keyboardActions = KeyboardActions(onSearch = { keyboard?.hide() }),
+                    modifier = Modifier.weight(1f),
+                    decorationBox = { innerTextField ->
+                        Box(Modifier.fillMaxWidth().padding(vertical = 10.dp), contentAlignment = Alignment.CenterStart) {
+                            if (state.historyQuery.isEmpty()) {
+                                Text(
+                                    "Search chats",
+                                    style = searchStyle,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.82f),
+                                )
+                            }
+                            innerTextField()
+                        }
+                    },
                 )
                 if (state.historyQuery.isNotEmpty()) {
-                    AppIconButton(R.drawable.ic_close, "Clear search", { onSearchChange("") }, enabled = !state.historyTransferring)
+                    IconButton(
+                        onClick = { onSearchChange("") },
+                        enabled = !state.historyTransferring,
+                        modifier = Modifier.size(34.dp),
+                    ) {
+                        AppIcon(R.drawable.ic_close, "Clear search", size = 18.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
                 }
             }
         }
         if (busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-        state.error?.let { MessageBanner(it, error = true, modifier = Modifier.padding(16.dp)) }
-        state.historyNotice?.let { Text(it, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(16.dp)) }
+        state.error?.let { MessageBanner(it, error = true, modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) }
+        state.historyNotice?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp),
+            )
+        }
         if (!busy && state.historyEntries.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text(
@@ -100,61 +141,112 @@ fun ChatHistoryScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-        } else LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(state.historyEntries, key = { it.id }) { entry ->
-                val snippet = state.historySnippets[entry.id]
-                val titleText = remember(entry.title, queryTerms, highlightColor) {
-                    highlightMatches(entry.title, queryTerms, highlightColor)
-                }
-                val snippetText = remember(snippet, queryTerms, highlightColor) {
-                    snippet?.let { highlightMatches(it, queryTerms, highlightColor) }
-                }
-                Surface(onClick = { keyboard?.hide(); onOpen(entry.id) }, enabled = !state.historyLoading, modifier = Modifier.fillMaxWidth(),
-                    color = MaterialTheme.colorScheme.surfaceContainerLow, shape = MaterialTheme.shapes.large) {
-                    Row(Modifier.padding(start = 16.dp, top = 12.dp, bottom = 12.dp, end = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(titleText, style = MaterialTheme.typography.titleSmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            snippetText?.let {
-                                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    maxLines = 2, overflow = TextOverflow.Ellipsis)
-                            }
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                Text(dateFormat.format(Date(entry.updatedAt)), style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                if (entry.pairedChatId != null) {
-                                    val pairBadge = if (state.historyQuery.isNotBlank() && entry.pairSlot != null) {
-                                        "2× ${if (entry.pairSlot == 1) "B" else "A"}"
-                                    } else {
-                                        "2×"
+        } else {
+            LazyColumn(
+                Modifier.weight(1f).fillMaxWidth(),
+                contentPadding = PaddingValues(bottom = 20.dp),
+            ) {
+                itemsIndexed(state.historyEntries, key = { _, item -> item.id }) { index, entry ->
+                    val snippet = state.historySnippets[entry.id]
+                    val titleText = remember(entry.title, queryTerms, highlightColor) {
+                        highlightMatches(entry.title, queryTerms, highlightColor)
+                    }
+                    val snippetText = remember(snippet, queryTerms, highlightColor) {
+                        snippet?.let { highlightMatches(it, queryTerms, highlightColor) }
+                    }
+                    Column(Modifier.fillMaxWidth()) {
+                        if (index > 0) AppDivider(Modifier.padding(horizontal = 20.dp))
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable(enabled = !state.historyLoading) { keyboard?.hide(); onOpen(entry.id) }
+                                .padding(start = 20.dp, end = 8.dp, top = 14.dp, bottom = 14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    titleText,
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                                snippetText?.let {
+                                    Text(
+                                        it,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    Text(
+                                        dateFormat.format(Date(entry.updatedAt)),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    if (entry.pairedChatId != null) {
+                                        val pairBadge = if (state.historyQuery.isNotBlank() && entry.pairSlot != null) {
+                                            "2× ${if (entry.pairSlot == 1) "B" else "A"}"
+                                        } else {
+                                            "2×"
+                                        }
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                                            contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+                                            shape = CircleShape,
+                                        ) {
+                                            Text(
+                                                pairBadge,
+                                                style = MaterialTheme.typography.labelSmall,
+                                                fontWeight = FontWeight.SemiBold,
+                                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                            )
+                                        }
                                     }
-                                    Surface(
-                                        color = MaterialTheme.colorScheme.tertiaryContainer,
-                                        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                                        shape = CircleShape,
-                                    ) {
+                                    if (entry.pending) {
                                         Text(
-                                            pairBadge,
+                                            "Running",
                                             style = MaterialTheme.typography.labelSmall,
-                                            fontWeight = FontWeight.SemiBold,
-                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                                            fontWeight = FontWeight.Medium,
+                                            color = MaterialTheme.colorScheme.primary,
                                         )
                                     }
                                 }
                             }
-                            if (entry.pending) Text("Running", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                            IconButton(
+                                onClick = { deleting = entry },
+                                enabled = !state.historyLoading && !entry.pending,
+                            ) {
+                                AppIcon(
+                                    R.drawable.ic_delete,
+                                    "Delete chat",
+                                    size = 19.dp,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                                )
+                            }
                         }
-                        AppIconButton(R.drawable.ic_delete, "Delete chat", { deleting = entry }, enabled = !state.historyLoading && !entry.pending)
                     }
                 }
             }
         }
     }
     deleting?.let { entry ->
-        AlertDialog(onDismissRequest = { deleting = null }, title = { Text("Delete chat?") },
+        AlertDialog(
+            onDismissRequest = { deleting = null },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(24.dp),
+            title = { Text("Delete chat?", fontWeight = FontWeight.SemiBold) },
             text = { Text(entry.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-            confirmButton = { TextButton(onClick = { deleting = null; onDelete(entry.id) }) { Text("Delete") } },
-            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } })
+            confirmButton = {
+                TextButton(onClick = { deleting = null; onDelete(entry.id) }) {
+                    Text("Delete", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
+        )
     }
 }
 

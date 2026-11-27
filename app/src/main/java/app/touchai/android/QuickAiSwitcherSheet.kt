@@ -2,11 +2,13 @@ package app.touchai.android
 
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -16,7 +18,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.touchai.core.openai.AuthenticationMethod
@@ -99,13 +100,24 @@ fun QuickAiSwitcherSheet(
         }
     }
 
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surface,
+        tonalElevation = 0.dp,
+        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp),
+        dragHandle = {
+            Box(Modifier.fillMaxWidth().padding(top = 12.dp, bottom = 8.dp), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(34.dp, 4.dp).clip(CircleShape).background(MaterialTheme.colorScheme.outlineVariant))
+            }
+        },
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .verticalScroll(rememberScrollState())
-                .padding(start = 16.dp, end = 16.dp, bottom = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+                .padding(start = 20.dp, end = 20.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
                 Modifier.fillMaxWidth(),
@@ -123,24 +135,16 @@ fun QuickAiSwitcherSheet(
                     modifier = Modifier.weight(1f),
                 )
                 if (allowDual && onDualModeChange != null) {
-                    FilterChip(
+                    AppPillChip(
+                        label = "2×",
                         selected = isDual,
+                        accentTertiary = true,
                         onClick = {
                             val next = !isDual
                             isDual = next
-                            if (next) {
-                                activeSlot = 1
-                            } else {
-                                activeSlot = if (editingSecondaryInSingleMode) 1 else 0
-                            }
+                            activeSlot = if (next) 1 else if (editingSecondaryInSingleMode) 1 else 0
                             onDualModeChange(next)
                         },
-                        label = { Text("2×", fontWeight = FontWeight.SemiBold) },
-                        shape = CircleShape,
-                        colors = FilterChipDefaults.filterChipColors(
-                            selectedContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
-                            selectedLabelColor = MaterialTheme.colorScheme.onTertiaryContainer,
-                        ),
                     )
                 }
                 if (canReset && onReset != null) {
@@ -153,6 +157,7 @@ fun QuickAiSwitcherSheet(
                             onDismiss()
                         },
                         enabled = primaryDraft.api.model.isNotBlank(),
+                        shape = CircleShape,
                     ) {
                         Text(confirmLabel)
                     }
@@ -160,32 +165,30 @@ fun QuickAiSwitcherSheet(
             }
 
             if (isDual) {
-                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
-                    val slots = listOf(
-                        "A · ${primaryDraft.api.model.ifBlank { "Pick model" }}",
-                        "B · ${secondaryDraft.api.model.ifBlank { "Pick model" }}",
-                    )
-                    slots.forEachIndexed { index, label ->
-                        SegmentedButton(
-                            selected = activeSlot == index,
-                            onClick = { activeSlot = index },
-                            shape = SegmentedButtonDefaults.itemShape(index, slots.size),
-                            icon = {},
-                        ) {
-                            Text(label, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        }
-                    }
-                }
+                val slots = listOf(0, 1)
+                AppSegmentBar(
+                    options = slots,
+                    selected = { it == activeSlot },
+                    label = { idx ->
+                        if (idx == 0) "A · ${primaryDraft.api.model.ifBlank { "Pick model" }}"
+                        else "B · ${secondaryDraft.api.model.ifBlank { "Pick model" }}"
+                    },
+                    onSelect = { activeSlot = it },
+                )
             }
 
             if (connections.size > 1) {
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     connections.forEach { connection ->
                         val selected = connection.id == selectedConnection?.id
-                        FilterChip(
+                        AppPillChip(
+                            label = connection.name.ifBlank { "API" },
                             selected = selected,
                             onClick = {
-                                if (selected) return@FilterChip
+                                if (selected) return@AppPillChip
                                 val targetKey = connection.recentEndpointKey()
                                 val sameModels = selectedConnection != null &&
                                     selectedConnection.authentication == connection.authentication &&
@@ -195,7 +198,7 @@ fun QuickAiSwitcherSheet(
                                         selectedConnection.chatGptAccountId == connection.chatGptAccountId
                                     }
                                 val nextModel = if (sameModels) draft.api.model
-                                    else recentModels.firstOrNull { it.endpointKey == targetKey }?.model.orEmpty()
+                                else recentModels.firstOrNull { it.endpointKey == targetKey }?.model.orEmpty()
                                 updateDraft(
                                     draft.copy(
                                         connectionId = connection.id,
@@ -203,29 +206,28 @@ fun QuickAiSwitcherSheet(
                                     ),
                                 )
                             },
-                            label = { Text(connection.name.ifBlank { "API" }) },
-                            shape = CircleShape,
                         )
                     }
                 }
             }
 
             if (quickModels.isNotEmpty()) {
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
                     quickModels.forEach { recentId ->
-                        FilterChip(
+                        AppPillChip(
+                            label = recentId,
                             selected = draft.api.model == recentId,
                             onClick = { updateDraft(draft.copy(api = draft.api.copy(model = recentId))) },
-                            label = { Text(recentId) },
-                            shape = CircleShape,
                         )
                     }
-                    FilterChip(
+                    AppPillChip(
+                        label = "More",
                         selected = showAllModels,
                         onClick = { showAllModels = !showAllModels },
-                        label = { Text("More") },
-                        trailingIcon = { AppIcon(R.drawable.ic_expand, null, size = 16.dp) },
-                        shape = CircleShape,
+                        trailingIcon = { AppIcon(R.drawable.ic_expand, null, size = 15.dp) },
                     )
                 }
             }
@@ -236,6 +238,8 @@ fun QuickAiSwitcherSheet(
                 }
             }
 
+            AppDivider()
+
             ReasoningEffortEditor(
                 effort = draft.api.reasoningEffort,
                 showCustomInput = false,
@@ -244,6 +248,7 @@ fun QuickAiSwitcherSheet(
             }
 
             if ((selectedConnection?.authentication ?: draft.api.authentication) != AuthenticationMethod.ChatGpt) {
+                AppDivider()
                 val protocol = selectedConnection?.protocol ?: draft.api.protocol
                 val effectiveTier = wireServiceTier(protocol, draft.api.serviceTier)
                 val tierLabel = when (effectiveTier) {
@@ -259,7 +264,7 @@ fun QuickAiSwitcherSheet(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clip(MaterialTheme.shapes.small)
+                            .clip(RoundedCornerShape(10.dp))
                             .clickable { speedExpanded = !speedExpanded }
                             .padding(vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,

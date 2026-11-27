@@ -134,9 +134,15 @@ fun ModelField(connection: ApiConnection?, model: String, onChange: (String) -> 
     }
     // Refresh sits inside the field so the box spans the full width like the other fields.
     Box(Modifier.fillMaxWidth()) {
-        OutlinedTextField(model, onChange, label = { Text("Model") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false), isError = failed,
-            supportingText = supporting?.let { text -> { Text(text) } },
+        AppTextField(
+            value = model,
+            onValueChange = onChange,
+            label = "Model",
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+            keyboardOptions = KeyboardOptions(autoCorrectEnabled = false),
+            isError = failed,
+            supportingText = supporting,
             trailingIcon = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     if (loading) Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
@@ -144,8 +150,15 @@ fun ModelField(connection: ApiConnection?, model: String, onChange: (String) -> 
                     } else if (connection != null) AppIconButton(R.drawable.ic_refresh, "Refresh models", { reload++ })
                     AppIconButton(R.drawable.ic_expand, "Choose model", { menu = true }, enabled = prioritized.isNotEmpty())
                 }
-            })
-        DropdownMenu(menu, { menu = false }, Modifier.heightIn(max = 360.dp)) {
+            },
+        )
+        DropdownMenu(
+            expanded = menu,
+            onDismissRequest = { menu = false },
+            modifier = Modifier.heightIn(max = 360.dp),
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = androidx.compose.foundation.shape.RoundedCornerShape(16.dp),
+        ) {
             shown.forEach { option ->
                 val candidate = option.model
                 DropdownMenuItem(
