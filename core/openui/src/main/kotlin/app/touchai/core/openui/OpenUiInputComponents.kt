@@ -4,11 +4,14 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -17,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -256,8 +260,9 @@ internal fun OpenUiPressable(
     val explicitBg = openUiColor(element.props.stringProp("background"), scheme, asBackground = true)
     val bg = explicitBg ?: if (selected) scheme.primaryContainer else scheme.surfaceContainerLow
 
+    val inRow = LocalOpenUiInRow.current
     Surface(
-        modifier = modifier.fillMaxWidth(),
+        modifier = if (inRow) modifier else modifier.fillMaxWidth(),
         shape = RoundedCornerShape(radius.coerceAtLeast(14.dp)),
         color = bg,
         onClick = { ctx.triggerAction(action, fallbackLabel = null, form = form) },
@@ -468,43 +473,89 @@ internal fun OpenUiSegmentedControl(
     if (options.isEmpty()) return
     val scheme = MaterialTheme.colorScheme
 
-    Column(modifier = modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(20.dp),
-            verticalAlignment = Alignment.Bottom,
-        ) {
-            options.forEach { option ->
-                val selected = option.value == current
-                Column(
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val estimatedUnits = options.sumOf { opt ->
+            opt.label.sumOf { ch -> if (ch.code > 0x2E80) 14 else 9 } + 24
+        }
+        val useScrollable = options.size >= 5 || estimatedUnits.dp > maxWidth
+
+        Column(modifier = Modifier.fillMaxWidth()) {
+            if (useScrollable) {
+                Row(
                     modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
-                        .clickable { if (target != null) ctx.onSetState(target, JsonPrimitive(option.value)) },
-                    horizontalAlignment = Alignment.CenterHorizontally,
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.Bottom,
                 ) {
-                    Text(
-                        text = option.label,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
-                        color = if (selected) scheme.primary else scheme.onSurface,
-                        maxLines = 1,
-                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 9.dp),
-                    )
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(2.dp)
-                            .clip(CircleShape)
-                            .background(if (selected) scheme.primary else Color.Transparent),
-                    )
+                    options.forEach { option ->
+                        val selected = option.value == current
+                        Column(
+                            modifier = Modifier
+                                .width(IntrinsicSize.Max)
+                                .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                                .clickable { if (target != null) ctx.onSetState(target, JsonPrimitive(option.value)) },
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                text = option.label,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                color = if (selected) scheme.primary else scheme.onSurface,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 9.dp),
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(2.dp)
+                                    .clip(CircleShape)
+                                    .background(if (selected) scheme.primary else Color.Transparent),
+                            )
+                        }
+                    }
+                }
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.Bottom,
+                ) {
+                    options.forEach { option ->
+                        val selected = option.value == current
+                        Column(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                                .clickable { if (target != null) ctx.onSetState(target, JsonPrimitive(option.value)) },
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Text(
+                                text = option.label,
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                                color = if (selected) scheme.primary else scheme.onSurface,
+                                maxLines = 1,
+                                softWrap = false,
+                                modifier = Modifier.padding(horizontal = 2.dp, vertical = 9.dp),
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(2.dp)
+                                    .clip(CircleShape)
+                                    .background(if (selected) scheme.primary else Color.Transparent),
+                            )
+                        }
+                    }
                 }
             }
+            androidx.compose.material3.HorizontalDivider(
+                thickness = 0.75.dp,
+                color = scheme.outlineVariant,
+            )
         }
-        androidx.compose.material3.HorizontalDivider(
-            thickness = 0.75.dp,
-            color = scheme.outlineVariant,
-        )
     }
 }
 

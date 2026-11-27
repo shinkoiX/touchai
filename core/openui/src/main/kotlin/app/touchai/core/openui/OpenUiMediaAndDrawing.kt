@@ -95,9 +95,9 @@ internal fun OpenUiImage(element: OpenUiElement, modifier: Modifier = Modifier) 
     var zoomed by remember { mutableStateOf(false) }
 
     val shape = RoundedCornerShape(radius)
+    val inRow = LocalOpenUiInRow.current
     Box(
-        modifier = modifier
-            .fillMaxWidth()
+        modifier = (if (inRow) modifier.width(128.dp) else modifier.fillMaxWidth())
             .aspectRatio(ratio)
             .clip(shape)
             .background(scheme.surfaceContainerLow)
@@ -640,16 +640,33 @@ internal fun OpenUiSvg(element: OpenUiElement, modifier: Modifier = Modifier) {
     val children = element.props.elementListProp("children")
     val scheme = MaterialTheme.colorScheme
     val ratio = (viewBox.width / viewBox.height).coerceIn(0.25f, 4f)
+    val inRow = LocalOpenUiInRow.current
 
+    val explicitWidth = openUiLength(element.props["width"])
+    val explicitHeight = openUiLength(element.props["height"])
     var mod = modifier
-    when (val w = openUiLength(element.props["width"])) {
-        is OpenUiLength.Fixed -> mod = mod.width(w.dp)
-        is OpenUiLength.Fraction -> mod = mod.fillMaxWidth(w.fraction)
-        null -> mod = mod.fillMaxWidth()
+    when (explicitWidth) {
+        is OpenUiLength.Fixed -> mod = mod.width(
+            if (inRow) explicitWidth.dp.coerceAtMost(160.dp) else explicitWidth.dp,
+        )
+        is OpenUiLength.Fraction -> mod = if (inRow) {
+            mod.width((viewBox.width.coerceIn(72f, 160f)).dp)
+        } else {
+            mod.fillMaxWidth(explicitWidth.fraction)
+        }
+        null -> mod = if (inRow) {
+            mod.width((viewBox.width.coerceIn(72f, 160f)).dp)
+        } else {
+            mod.fillMaxWidth()
+        }
     }
-    when (val h = openUiLength(element.props["height"])) {
-        is OpenUiLength.Fixed -> mod = mod.height(h.dp)
-        else -> mod = mod.aspectRatio(ratio)
+    mod = when {
+        explicitWidth is OpenUiLength.Fixed && explicitHeight is OpenUiLength.Fixed -> {
+            val fixedRatio = (explicitWidth.dp.value / explicitHeight.dp.value).coerceIn(0.25f, 4f)
+            mod.aspectRatio(fixedRatio)
+        }
+        explicitHeight is OpenUiLength.Fixed && !inRow -> mod.height(explicitHeight.dp)
+        else -> mod.aspectRatio(ratio)
     }
 
     Canvas(modifier = mod) {
