@@ -53,45 +53,50 @@ fun openUiColor(
     val isDark = scheme.surface.luminance() < 0.5f
     val key = raw.lowercase()
 
-    val statusAlpha = if (isDark) 0.18f else 0.10f
     return when (key) {
         "ink" -> scheme.onSurface
         "muted" -> scheme.onSurfaceVariant
-        "faint" -> scheme.onSurfaceVariant.copy(alpha = 0.62f)
+        "faint" -> scheme.onSurfaceVariant.copy(alpha = 0.72f)
         "surface" -> if (asBackground) scheme.surfaceContainerLow else scheme.surfaceContainerHigh
-        "neutral" -> if (asBackground) scheme.surfaceContainerHigh.copy(alpha = if (isDark) 0.85f else 0.72f) else scheme.onSurfaceVariant
-        "primary" -> if (asBackground) scheme.primary.copy(alpha = statusAlpha) else scheme.primary
-        "info" -> {
-            val base = if (isDark) Color(0xFF60A5FA) else Color(0xFF0285FF)
-            if (asBackground) base.copy(alpha = statusAlpha) else base
+        "neutral" -> if (asBackground) scheme.surfaceContainerLow else scheme.onSurfaceVariant
+        "primary" -> if (asBackground) scheme.primaryContainer else scheme.primary
+        "info" -> if (asBackground) {
+            if (isDark) Color(0xFF2A3351) else Color(0xFFEEF5FF)
+        } else {
+            if (isDark) Color(0xFFA8CDFA) else Color(0xFF1F57C3)
         }
-        "success" -> {
-            val base = if (isDark) Color(0xFF34D399) else Color(0xFF00875A)
-            if (asBackground) base.copy(alpha = statusAlpha) else base
+        "success" -> if (asBackground) {
+            if (isDark) Color(0xFF283E33) else Color(0xFFEAFAF3)
+        } else {
+            if (isDark) Color(0xFF72CA9E) else Color(0xFF1F7A5C)
         }
-        "warning" -> {
-            val base = if (isDark) Color(0xFFFBBF24) else Color(0xFFB45309)
-            if (asBackground) base.copy(alpha = statusAlpha) else base
+        "warning" -> if (asBackground) {
+            if (isDark) Color(0xFF423724) else Color(0xFFFFF6DC)
+        } else {
+            if (isDark) Color(0xFFEEBB63) else Color(0xFF8A5200)
         }
-        "danger" -> {
-            val base = if (isDark) Color(0xFFF87171) else Color(0xFFDC2626)
-            if (asBackground) base.copy(alpha = statusAlpha) else base
+        "danger" -> if (asBackground) {
+            if (isDark) Color(0xFF49272A) else Color(0xFFFFF1F5)
+        } else {
+            if (isDark) Color(0xFFEA7B85) else Color(0xFFC43A68)
         }
-        "purple" -> {
-            val base = if (isDark) Color(0xFFC084FC) else Color(0xFF7C3AED)
-            if (asBackground) base.copy(alpha = statusAlpha) else base
+        "purple" -> if (asBackground) {
+            if (isDark) Color(0xFF342B4A) else Color(0xFFF3EFFF)
+        } else {
+            if (isDark) Color(0xFFB49FEF) else Color(0xFF6B53C8)
         }
-        "pink" -> {
-            val base = if (isDark) Color(0xFFF472B6) else Color(0xFFDB2777)
-            if (asBackground) base.copy(alpha = statusAlpha) else base
+        "pink" -> if (asBackground) {
+            if (isDark) Color(0xFF4E2C35) else Color(0xFFFFF1F5)
+        } else {
+            if (isDark) Color(0xFFF797B4) else Color(0xFFC43A68)
         }
-        // Official OpenUI intelligent-ui chart palette
-        "chart1" -> if (isDark) Color(0xFF3B9EFF) else Color(0xFF0285FF)
-        "chart2" -> if (isDark) Color(0xFF22C59B) else Color(0xFF00A67D)
-        "chart3" -> if (isDark) Color(0xFFA78BFA) else Color(0xFF8B5CF6)
-        "chart4" -> if (isDark) Color(0xFFFBBF58) else Color(0xFFF4A340)
-        "chart5" -> if (isDark) Color(0xFFF084A6) else Color(0xFFE46D91)
-        "chart6" -> if (isDark) Color(0xFF63B4BE) else Color(0xFF4B9CA6)
+        // Baby-blue, mint, lavender, butter, pink harmonious chart palette
+        "chart1" -> if (isDark) Color(0xFF7BB2F4) else Color(0xFF3F7FE8)
+        "chart2" -> if (isDark) Color(0xFF72CA9E) else Color(0xFF36B38B)
+        "chart3" -> if (isDark) Color(0xFFB49FEF) else Color(0xFF937CE6)
+        "chart4" -> if (isDark) Color(0xFFEEBB63) else Color(0xFFE5A93B)
+        "chart5" -> if (isDark) Color(0xFFF797B4) else Color(0xFFEA6E95)
+        "chart6" -> if (isDark) Color(0xFFA8CDFA) else Color(0xFF79B4F7)
         "transparent" -> Color.Transparent
         "white" -> Color.White
         "black" -> Color.Black

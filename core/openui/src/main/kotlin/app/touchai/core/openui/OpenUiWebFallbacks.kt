@@ -162,9 +162,8 @@ internal fun OpenUiHtmlView(element: OpenUiElement, modifier: Modifier = Modifie
 
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         color = scheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, scheme.outlineVariant),
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             if (!title.isNullOrBlank()) {

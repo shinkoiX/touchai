@@ -223,10 +223,12 @@ internal fun parseInlineMarkdown(text: String, scheme: androidx.compose.material
 @Composable
 internal fun OpenUiCaption(element: OpenUiElement, modifier: Modifier = Modifier) {
     val text = element.props.stringProp("text").orEmpty()
-    val color = openUiColor(element.props.stringProp("color"), MaterialTheme.colorScheme)
-        ?: MaterialTheme.colorScheme.onSurfaceVariant
+    val scheme = MaterialTheme.colorScheme
+    val color = openUiColor(element.props.stringProp("color"), scheme)
+        ?: scheme.onSurfaceVariant
+    val annotated = remember(text, scheme) { parseInlineMarkdown(text, scheme) }
     Text(
-        text = text,
+        text = annotated,
         style = MaterialTheme.typography.labelMedium,
         color = color,
         modifier = modifier,
@@ -305,11 +307,19 @@ internal fun OpenUiList(
     val timeline = element.props.boolProp("timeline") == true
     val scheme = MaterialTheme.colorScheme
 
+    val isRichList = !timeline && items.any { raw ->
+        val el = raw.asOpenUiElementOrNull()
+        el != null && (!el.props.stringProp("description").isNullOrBlank() || el.props.elementListProp("children").isNotEmpty())
+    }
+
     Column(
         modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(if (timeline) 0.dp else 10.dp),
+        verticalArrangement = Arrangement.spacedBy(if (timeline) 0.dp else if (isRichList) 12.dp else 8.dp),
     ) {
         items.forEachIndexed { index, raw ->
+            if (isRichList && index > 0) {
+                OpenUiDivider()
+            }
             val isLast = index == items.lastIndex
             val itemEl = raw.asOpenUiElementOrNull()
             val title = itemEl?.props?.stringProp("title")
@@ -437,8 +447,9 @@ internal fun OpenUiQuote(element: OpenUiElement, modifier: Modifier = Modifier) 
                 .background(scheme.primary.copy(alpha = 0.75f)),
         )
         Column(verticalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.weight(1f)) {
+            val annotated = remember(text, scheme) { parseInlineMarkdown(text, scheme) }
             Text(
-                text = text,
+                text = annotated,
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.5.sp, lineHeight = 23.sp),
                 color = scheme.onSurface.copy(alpha = 0.88f),
             )

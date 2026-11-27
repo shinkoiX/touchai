@@ -151,6 +151,21 @@ data class OpenAIChatUiState(
         val position = siblings.indexOfFirst { it.id == node.id }.coerceAtLeast(0)
         return BranchInfo(node.id, position, siblings.size)
     }
+
+    /**
+     * Deterministic, UUID-independent structural key for a turn on the active branch path.
+     * Remains stable across linear streaming updates even when [SavedChat.resolvedTree]
+     * reconstructs a fresh linear [ChatTree] with new node UUIDs on each token flush.
+     */
+    fun branchPathKey(turnIndex: Int): String {
+        val path = chatTree.activePath()
+        if (turnIndex !in path.indices) return "$turnIndex"
+        return (0..turnIndex).joinToString("/") { idx ->
+            val node = path[idx]
+            val siblings = chatTree.siblingsOf(node.id)
+            siblings.indexOfFirst { it.id == node.id }.coerceAtLeast(0).toString()
+        }
+    }
 }
 
 class OpenAIChatViewModel(

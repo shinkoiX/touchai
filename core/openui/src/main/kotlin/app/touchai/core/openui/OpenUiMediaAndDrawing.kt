@@ -101,7 +101,6 @@ internal fun OpenUiImage(element: OpenUiElement, modifier: Modifier = Modifier) 
             .aspectRatio(ratio)
             .clip(shape)
             .background(scheme.surfaceContainerLow)
-            .border(0.5.dp, scheme.outlineVariant.copy(alpha = 0.38f), shape)
             .clickable(enabled = src.isNotBlank()) { zoomed = true },
         contentAlignment = Alignment.Center,
     ) {
@@ -225,9 +224,8 @@ internal fun OpenUiTable(
 
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(12.dp),
-        color = scheme.surface,
-        border = BorderStroke(1.dp, scheme.outlineVariant.copy(alpha = 0.7f)),
+        shape = RoundedCornerShape(16.dp),
+        color = scheme.surfaceContainerLow.copy(alpha = 0.65f),
     ) {
         Box(modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())) {
             Column {
@@ -515,12 +513,11 @@ internal fun OpenUiYouTube(
     val thumbUrl = videoId?.let { "https://img.youtube.com/vi/$it/hqdefault.jpg" }
 
     Surface(
-        modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).clickable(enabled = watchUrl.isNotBlank()) {
+        modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable(enabled = watchUrl.isNotBlank()) {
             ctx.onOpenUrl(watchUrl)
         },
-        shape = RoundedCornerShape(14.dp),
+        shape = RoundedCornerShape(16.dp),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Column {
             Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f), contentAlignment = Alignment.Center) {
@@ -567,10 +564,9 @@ internal fun OpenUiFlashcard(
     val content = if (flipped) element.props["back"] else element.props["front"]
 
     Surface(
-        modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).clickable { flipped = !flipped },
-        shape = RoundedCornerShape(16.dp),
-        color = if (flipped) scheme.secondaryContainer.copy(alpha = 0.5f) else scheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, scheme.outlineVariant),
+        modifier = modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).clickable { flipped = !flipped },
+        shape = RoundedCornerShape(18.dp),
+        color = if (flipped) scheme.surfaceContainerHigh else scheme.surfaceContainerLow,
     ) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(18.dp),

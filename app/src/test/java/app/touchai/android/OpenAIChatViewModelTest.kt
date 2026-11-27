@@ -801,4 +801,53 @@ class OpenAIChatViewModelTest {
         reopened.switchBranch(0, -1)
         assertEquals(listOf("Answer v1", "Follow-up under v1"), reopened.uiState.value.turns.map { it.answer })
     }
+
+    @Test fun branchPathKeyRemainsStableAcrossLinearStreamingChunksAndDistinguishesBranches() = runTest {
+        val gate = CompletableDeferred<Unit>()
+        var calls = 0
+        val api = client {
+            calls += 1
+            flow {
+                if (calls == 1) {
+                    emit(OpenAIStreamEvent.TextDelta("root = Col([a])\n"))
+                    kotlinx.coroutines.delay(60)
+                    emit(OpenAIStreamEvent.TextDelta("a = Title(\"Hello\")\n"))
+                    gate.await()
+                    emit(completed)
+                } else {
+                    emit(OpenAIStreamEvent.TextDelta("root = Col([b])\nb = Title(\"Retry\")\n"))
+                    emit(completed)
+                }
+            }
+        }
+        val vm = testChatViewModel(history, Repository(settings), api)
+        runCurrent()
+
+        vm.setPrompt("Hi")
+        vm.submit()
+        advanceTimeBy(80)
+        runCurrent()
+        val keyAfterFirstChunk = vm.uiState.value.branchPathKey(0)
+        val nodeIdAfterFirstChunk = vm.uiState.value.branchInfo(0)?.nodeId
+
+        advanceTimeBy(80)
+        runCurrent()
+        val keyAfterSecondChunk = vm.uiState.value.branchPathKey(0)
+        val nodeIdAfterSecondChunk = vm.uiState.value.branchInfo(0)?.nodeId
+
+        assertEquals("0", keyAfterFirstChunk)
+        assertEquals(keyAfterFirstChunk, keyAfterSecondChunk)
+        // Confirm linear streaming indeed regenerates node UUIDs, proving why branchPathKey is required.
+        assertNotEquals(nodeIdAfterFirstChunk, nodeIdAfterSecondChunk)
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("0", vm.uiState.value.branchPathKey(0))
+
+        vm.retry(turnIndex = 0)
+        advanceUntilIdle()
+        assertEquals("1", vm.uiState.value.branchPathKey(0))
+        vm.switchBranch(0, -1)
+        assertEquals("0", vm.uiState.value.branchPathKey(0))
+    }
 }

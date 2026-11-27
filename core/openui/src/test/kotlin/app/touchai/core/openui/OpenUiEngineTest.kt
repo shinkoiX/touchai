@@ -31,12 +31,17 @@ class OpenUiEngineTest {
 
         assertTrue(OpenUiDetector.looksLikeStreamingOpenUi("root ="))
         assertTrue(OpenUiDetector.looksLikeStreamingOpenUi("```openui\nroot"))
+        assertEquals("", stableOpenUiProgram("root = Col([a", isStreaming = true))
+        assertEquals("root = Col([a])", stableOpenUiProgram("root = Col([a])\na = Title(\"Half", isStreaming = true))
+        assertEquals("root = Col([a])\na = Title(\"Done\")", stableOpenUiProgram("root = Col([a])\na = Title(\"Done\")", isStreaming = false))
     }
 
     @Test
     fun mergeInstructionsRespectsToggle() {
         assertEquals("Be concise.", OpenUiAssets.mergeInstructions("Be concise.", "PROMPT", enabled = false, webSearchEnabled = true))
-        assertEquals("PROMPT", OpenUiAssets.mergeInstructions("  ", "PROMPT", enabled = true, webSearchEnabled = false))
+        val bare = OpenUiAssets.mergeInstructions("  ", "PROMPT", enabled = true, webSearchEnabled = false)
+        assertTrue(bare.startsWith("PROMPT"))
+        assertTrue(bare.contains("## Mobile Editorial Layout Preference"))
         val merged = OpenUiAssets.mergeInstructions("Answer in Chinese.", "PROMPT", enabled = true, webSearchEnabled = false)
         assertTrue(merged.startsWith("PROMPT"))
         assertTrue(merged.contains("Answer in Chinese."))

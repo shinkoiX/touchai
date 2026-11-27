@@ -17,10 +17,13 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -63,6 +66,17 @@ internal class OpenUiRenderContext(
     val onToAssistant: (message: String, context: JsonElement?) -> Unit,
 )
 
+/**
+ * During streaming, openui-lang statements are line-oriented; slicing to the last newline avoids
+ * feeding half-typed strings/SVG/expressions that cause the AST to collapse or jitter mid-line.
+ */
+internal fun stableOpenUiProgram(program: String, isStreaming: Boolean): String {
+    if (!isStreaming) return program
+    val lastNewline = program.lastIndexOf('\n')
+    if (lastNewline <= 0) return ""
+    return program.substring(0, lastNewline)
+}
+
 @Composable
 fun OpenUiMessage(
     sessionId: String,
@@ -76,6 +90,8 @@ fun OpenUiMessage(
 ) {
     val scope = rememberCoroutineScope()
     var renderState by remember(sessionId) { mutableStateOf<OpenUiRenderState?>(null) }
+    val latestProgram by rememberUpdatedState(program)
+    val latestStreaming by rememberUpdatedState(isStreaming)
 
     fun handleEffects(result: OpenUiRenderState) {
         for (effect in result.effects) {
@@ -86,13 +102,38 @@ fun OpenUiMessage(
         }
     }
 
-    LaunchedEffect(sessionId, program, isStreaming) {
-        if (isStreaming) {
-            // Coalesce rapid token updates to keep streaming silky smooth at 60fps.
-            delay(48)
-        }
-        val next = engine.pushText(sessionId, program)
-        renderState = next
+    // Single conflated collector per session: never cancels mid-delay on rapid token bursts,
+    // only parses complete lines while streaming, and never replaces a valid rendered tree with null.
+    LaunchedEffect(sessionId) {
+        var lastEvaluatedText: String? = null
+        var lastEvaluatedStreaming: Boolean? = null
+        snapshotFlow { latestProgram to latestStreaming }
+            .conflate()
+            .collect { (raw, streaming) ->
+                val candidate = stableOpenUiProgram(raw, streaming)
+                if (candidate.isBlank()) {
+                    if (!streaming) {
+                        renderState = OpenUiRenderState(root = null)
+                    }
+                    return@collect
+                }
+                if (candidate == lastEvaluatedText && streaming == lastEvaluatedStreaming) {
+                    return@collect
+                }
+                val next = engine.pushText(sessionId, candidate)
+                lastEvaluatedText = candidate
+                lastEvaluatedStreaming = streaming
+                val prevChildren = renderState?.root?.props?.elementListProp("children").orEmpty().size
+                val nextChildren = next.root?.props?.elementListProp("children").orEmpty().size
+                val keepPreviousDuringStream = streaming && prevChildren > 0 && (next.root == null || nextChildren < prevChildren)
+                if (!keepPreviousDuringStream) {
+                    renderState = next
+                }
+                if (streaming) {
+                    // Pace streaming UI updates smoothly so reading stays calm and steady.
+                    delay(100)
+                }
+            }
     }
 
     DisposableEffect(sessionId) {
@@ -103,8 +144,9 @@ fun OpenUiMessage(
 
     val current = renderState
     val root = current?.root
+    val rootChildrenCount = root?.props?.elementListProp("children").orEmpty().size
 
-    if (root == null) {
+    if (root == null || (isStreaming && root.typeName == "Col" && rootChildrenCount == 0)) {
         if (isStreaming) {
             Box(modifier = modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                 CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)

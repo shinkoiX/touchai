@@ -29,18 +29,15 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TextField
+import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -169,16 +166,18 @@ internal fun OpenUiButton(
         }
     }
 
-    val buttonShape = RoundedCornerShape(10.dp)
+    val buttonShape = CircleShape
     when (variant) {
-        "outline" -> OutlinedButton(
+        "outline" -> FilledTonalButton(
             onClick = onClick,
             enabled = !disabled,
             modifier = mod,
             shape = buttonShape,
             contentPadding = contentPad,
-            border = BorderStroke(0.75.dp, scheme.outlineVariant),
-            colors = ButtonDefaults.outlinedButtonColors(contentColor = if (colorKey == "primary") scheme.onSurface else accent),
+            colors = ButtonDefaults.filledTonalButtonColors(
+                containerColor = scheme.primaryContainer,
+                contentColor = if (colorKey == "primary") scheme.onPrimaryContainer else accent,
+            ),
         ) { content() }
         "soft" -> FilledTonalButton(
             onClick = onClick,
@@ -186,6 +185,10 @@ internal fun OpenUiButton(
             modifier = mod,
             shape = buttonShape,
             contentPadding = contentPad,
+            colors = ButtonDefaults.filledTonalButtonColors(
+                containerColor = scheme.surfaceContainerLow,
+                contentColor = if (colorKey == "primary") scheme.onSurface else accent,
+            ),
         ) { content() }
         "ghost" -> TextButton(
             onClick = onClick,
@@ -221,16 +224,14 @@ internal fun OpenUiIconButton(
     val bg = when (variant) {
         "solid" -> scheme.primary
         "ghost" -> Color.Transparent
-        else -> scheme.surface
+        else -> scheme.surfaceContainerLow
     }
     val fg = if (variant == "solid") scheme.onPrimary else scheme.onSurface
-    val border = if (variant == "outline") BorderStroke(1.dp, scheme.outlineVariant) else null
 
     Surface(
         modifier = modifier.size(36.dp),
         shape = CircleShape,
         color = bg,
-        border = border,
         onClick = { ctx.triggerAction(action, fallbackLabel = element.props.stringProp("label"), form = form) },
     ) {
         Box(contentAlignment = Alignment.Center) {
@@ -253,14 +254,12 @@ internal fun OpenUiPressable(
     val radius = openUiRadiusDp(element.props["radius"], 12.dp)
     val scheme = MaterialTheme.colorScheme
     val explicitBg = openUiColor(element.props.stringProp("background"), scheme, asBackground = true)
-    val bg = explicitBg ?: if (selected) scheme.primary.copy(alpha = 0.08f) else scheme.surfaceContainerLowest
-    val borderColor = if (selected) scheme.primary else scheme.outlineVariant.copy(alpha = 0.5f)
+    val bg = explicitBg ?: if (selected) scheme.primaryContainer else scheme.surfaceContainerLow
 
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(radius),
+        shape = RoundedCornerShape(radius.coerceAtLeast(14.dp)),
         color = bg,
-        border = BorderStroke(if (selected) 1.5.dp else 0.75.dp, borderColor),
         onClick = { ctx.triggerAction(action, fallbackLabel = null, form = form) },
     ) {
         Column(modifier = Modifier.padding(pad), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -297,31 +296,45 @@ internal fun OpenUiInput(
     }
     val err = form?.errors?.get(fieldKey)
 
-    OutlinedTextField(
-        value = text,
-        onValueChange = { next ->
-            text = next
-            form?.errors?.remove(fieldKey)
-            if (target != null) {
-                val jsonVal = if (type == "number") {
-                    val trimmed = next.trim()
-                    if (trimmed.isEmpty()) JsonNull else trimmed.toDoubleOrNull()?.let { JsonPrimitive(it) } ?: JsonPrimitive(next)
-                } else {
-                    JsonPrimitive(next)
+    val scheme = MaterialTheme.colorScheme
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (!label.isNullOrBlank()) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant)
+        }
+        TextField(
+            value = text,
+            onValueChange = { next ->
+                text = next
+                form?.errors?.remove(fieldKey)
+                if (target != null) {
+                    val jsonVal = if (type == "number") {
+                        val trimmed = next.trim()
+                        if (trimmed.isEmpty()) JsonNull else trimmed.toDoubleOrNull()?.let { JsonPrimitive(it) } ?: JsonPrimitive(next)
+                    } else {
+                        JsonPrimitive(next)
+                    }
+                    ctx.onSetState(target, jsonVal)
                 }
-                ctx.onSetState(target, jsonVal)
-            }
-        },
-        label = label?.let { { Text(it) } },
-        placeholder = placeholder?.let { { Text(it) } },
-        isError = err != null,
-        supportingText = err?.let { { Text(it) } },
-        singleLine = true,
-        keyboardOptions = KeyboardOptions(
-            keyboardType = if (type == "number") KeyboardType.Decimal else KeyboardType.Text,
-        ),
-        modifier = modifier.fillMaxWidth(),
-    )
+            },
+            placeholder = placeholder?.let { { Text(it, color = scheme.onSurfaceVariant.copy(alpha = 0.65f)) } },
+            isError = err != null,
+            supportingText = err?.let { { Text(it) } },
+            singleLine = true,
+            shape = RoundedCornerShape(12.dp),
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = scheme.surfaceContainerLow,
+                unfocusedContainerColor = scheme.surfaceContainerLow,
+                errorContainerColor = scheme.errorContainer.copy(alpha = 0.35f),
+                focusedIndicatorColor = Color.Transparent,
+                unfocusedIndicatorColor = Color.Transparent,
+                errorIndicatorColor = Color.Transparent,
+            ),
+            keyboardOptions = KeyboardOptions(
+                keyboardType = if (type == "number") KeyboardType.Decimal else KeyboardType.Text,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 @Composable
@@ -346,21 +359,35 @@ internal fun OpenUiTextArea(
         onDispose { form?.unregister(fieldKey) }
     }
     val err = form?.errors?.get(fieldKey)
+    val scheme = MaterialTheme.colorScheme
 
-    OutlinedTextField(
-        value = text,
-        onValueChange = { next ->
-            text = next
-            form?.errors?.remove(fieldKey)
-            if (target != null) ctx.onSetState(target, JsonPrimitive(next))
-        },
-        label = label?.let { { Text(it) } },
-        placeholder = placeholder?.let { { Text(it) } },
-        minLines = rows,
-        isError = err != null,
-        supportingText = err?.let { { Text(it) } },
-        modifier = modifier.fillMaxWidth(),
-    )
+    Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        if (!label.isNullOrBlank()) {
+            Text(label, style = MaterialTheme.typography.labelMedium, color = scheme.onSurfaceVariant)
+        }
+        TextField(
+            value = text,
+            onValueChange = { next ->
+                text = next
+                form?.errors?.remove(fieldKey)
+                if (target != null) ctx.onSetState(target, JsonPrimitive(next))
+            },
+            placeholder = placeholder?.let { { Text(it, color = scheme.onSurfaceVariant.copy(alpha = 0.65f)) } },
+            minLines = rows,
+            isError = err != null,
+            supportingText = err?.let { { Text(it) } },
+            shape = RoundedCornerShape(12.dp),
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = scheme.surfaceContainerLow,
+                unfocusedContainerColor = scheme.surfaceContainerLow,
+                errorContainerColor = scheme.errorContainer.copy(alpha = 0.35f),
+                focusedIndicatorColor = Color.Transparent,
+                unfocusedIndicatorColor = Color.Transparent,
+                errorIndicatorColor = Color.Transparent,
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
 }
 
 @Composable
@@ -388,17 +415,17 @@ internal fun OpenUiSelect(
 
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         if (!label.isNullOrBlank()) {
-            Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         Box {
             Surface(
-                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { expanded = true },
-                shape = RoundedCornerShape(10.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, if (err != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline),
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { expanded = true },
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                border = if (err != null) BorderStroke(1.dp, MaterialTheme.colorScheme.error) else null,
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 13.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -407,7 +434,7 @@ internal fun OpenUiSelect(
                         style = MaterialTheme.typography.bodyMedium,
                         color = if (current.isBlank()) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurface,
                     )
-                    Text("▾", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    OpenUiGlyph("chevron-down", sizeDp = 16.dp, tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
             DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
@@ -429,7 +456,6 @@ internal fun OpenUiSelect(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun OpenUiSegmentedControl(
     element: OpenUiElement,
@@ -440,18 +466,45 @@ internal fun OpenUiSegmentedControl(
     val current = (element.props.boundValue("value", ctx.state) as? JsonPrimitive)?.contentOrNull
     val options = remember(element.props["options"]) { parseOptions(element.props.arrayProp("options")) }
     if (options.isEmpty()) return
+    val scheme = MaterialTheme.colorScheme
 
-    SingleChoiceSegmentedButtonRow(modifier = modifier.fillMaxWidth()) {
-        options.forEachIndexed { idx, option ->
-            SegmentedButton(
-                selected = option.value == current,
-                onClick = {
-                    if (target != null) ctx.onSetState(target, JsonPrimitive(option.value))
-                },
-                shape = SegmentedButtonDefaults.itemShape(index = idx, count = options.size),
-                label = { Text(option.label, maxLines = 1) },
-            )
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(20.dp),
+            verticalAlignment = Alignment.Bottom,
+        ) {
+            options.forEach { option ->
+                val selected = option.value == current
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 8.dp))
+                        .clickable { if (target != null) ctx.onSetState(target, JsonPrimitive(option.value)) },
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text(
+                        text = option.label,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Medium,
+                        color = if (selected) scheme.primary else scheme.onSurfaceVariant,
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = 4.dp, vertical = 9.dp),
+                    )
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(2.dp)
+                            .clip(CircleShape)
+                            .background(if (selected) scheme.primary else Color.Transparent),
+                    )
+                }
+            }
         }
+        androidx.compose.material3.HorizontalDivider(
+            thickness = 0.75.dp,
+            color = scheme.outlineVariant,
+        )
     }
 }
 
@@ -587,17 +640,26 @@ internal fun OpenUiRadioGroup(
         when (variant) {
             "pills" -> FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 options.forEach { option ->
-                    FilterChip(
-                        selected = option.value == current,
+                    val sel = option.value == current
+                    Surface(
                         onClick = {
                             form?.errors?.remove(fieldKey)
                             if (target != null) ctx.onSetState(target, JsonPrimitive(option.value))
                         },
-                        label = { Text(option.label) },
-                    )
+                        shape = CircleShape,
+                        color = if (sel) scheme.primary else scheme.surfaceContainerLow,
+                        contentColor = if (sel) scheme.onPrimary else scheme.onSurface,
+                    ) {
+                        Text(
+                            text = option.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (sel) FontWeight.SemiBold else FontWeight.Medium,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                        )
+                    }
                 }
             }
             "cards" -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -605,9 +667,8 @@ internal fun OpenUiRadioGroup(
                     val sel = option.value == current
                     Surface(
                         modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        color = if (sel) scheme.primaryContainer.copy(alpha = 0.4f) else scheme.surface,
-                        border = BorderStroke(if (sel) 1.5.dp else 1.dp, if (sel) scheme.primary else scheme.outlineVariant),
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (sel) scheme.primaryContainer else scheme.surfaceContainerLow,
                         onClick = {
                             form?.errors?.remove(fieldKey)
                             if (target != null) ctx.onSetState(target, JsonPrimitive(option.value))
@@ -674,10 +735,10 @@ internal fun OpenUiDatePicker(
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
         Surface(
-            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { showDialog = true },
-            shape = RoundedCornerShape(10.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, if (err != null) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.outline),
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { showDialog = true },
+            shape = RoundedCornerShape(12.dp),
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            border = if (err != null) BorderStroke(1.dp, MaterialTheme.colorScheme.error) else null,
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),

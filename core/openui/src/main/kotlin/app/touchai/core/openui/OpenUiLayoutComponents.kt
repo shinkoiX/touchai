@@ -28,6 +28,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -48,24 +49,56 @@ internal fun OpenUiCol(
     isRoot: Boolean = false,
 ) {
     val children = element.props.elementListProp("children")
-    val defaultGap = if (isRoot) 22.dp else 8.dp
+    val defaultGap = if (isRoot) 20.dp else 8.dp
     val gap = openUiStepDp(element.props.intProp("gap"), defaultGap)
     val align = when (element.props.stringProp("align")) {
         "center" -> Alignment.CenterHorizontally
         "end" -> Alignment.End
         else -> Alignment.Start
     }
+    // When the model stacks multiple itemized Cards vertically inside a Col, render them as
+    // clean borderless sections separated by subtle hairlines instead of stacking heavy boxes.
+    val cardCount = children.count { it.typeName == "Card" }
+    val flattenStackedCards = cardCount >= 2
+
     Column(
         modifier = modifier.fillMaxWidth(),
-        verticalArrangement = Arrangement.spacedBy(gap),
+        verticalArrangement = Arrangement.spacedBy(if (flattenStackedCards) 14.dp else gap),
         horizontalAlignment = align,
     ) {
-        children.forEach { child ->
-            if (child.typeName == "Spacer") {
-                Spacer(Modifier.height(gap.coerceAtLeast(8.dp)))
-            } else {
-                RenderOpenUiElement(child, ctx)
+        children.forEachIndexed { index, child ->
+            val stableKey = child.componentId ?: "${child.typeName}:$index"
+            key(stableKey) {
+                if (child.typeName == "Spacer") {
+                    Spacer(Modifier.height(gap.coerceAtLeast(8.dp)))
+                } else if (flattenStackedCards && child.typeName == "Card") {
+                    if (index > 0 && children[index - 1].typeName == "Card") {
+                        OpenUiDivider()
+                    }
+                    OpenUiFlatSection(child, ctx)
+                } else {
+                    RenderOpenUiElement(child, ctx)
+                }
             }
+        }
+    }
+}
+
+@Composable
+private fun OpenUiFlatSection(
+    element: OpenUiElement,
+    ctx: OpenUiRenderContext,
+    modifier: Modifier = Modifier,
+) {
+    val children = element.props.elementListProp("children")
+    val gap = openUiStepDp(element.props.intProp("gap"), 10.dp)
+    Column(
+        modifier = modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalArrangement = Arrangement.spacedBy(gap),
+    ) {
+        children.forEach { child ->
+            if (child.typeName == "Spacer") Spacer(Modifier.height(gap))
+            else RenderOpenUiElement(child, ctx)
         }
     }
 }
@@ -200,7 +233,7 @@ internal fun OpenUiBox(
     val shape = RoundedCornerShape(radius)
     if (radius > 0.dp) boxMod = boxMod.clip(shape)
     if (bg != null) boxMod = boxMod.background(bg, shape)
-    if (hasBorder) boxMod = boxMod.border(1.dp, scheme.outlineVariant, shape)
+    if (hasBorder && bg == null) boxMod = boxMod.background(scheme.surfaceContainerLow, shape)
     if (pad > 0.dp) boxMod = boxMod.padding(pad)
 
     if (direction == "row") {
@@ -303,19 +336,15 @@ internal fun OpenUiCard(
     modifier: Modifier = Modifier,
 ) {
     val children = element.props.elementListProp("children")
-    val variant = element.props.stringProp("variant") ?: "outline"
     val gap = openUiStepDp(element.props.intProp("gap"), 12.dp)
-    val padding = openUiStepDp(element.props.intProp("padding"), 18.dp)
+    val padding = openUiStepDp(element.props.intProp("padding"), 16.dp)
     val scheme = MaterialTheme.colorScheme
 
-    val containerColor = if (variant == "soft") scheme.surfaceContainerLow else scheme.surfaceContainerLowest
-    val border = if (variant == "soft") null else BorderStroke(0.75.dp, scheme.outlineVariant.copy(alpha = 0.5f))
-
+    // Pure borderless tonal surface — no boxy Material outline strokes.
     Surface(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(14.dp),
-        color = containerColor,
-        border = border,
+        shape = RoundedCornerShape(18.dp),
+        color = scheme.surfaceContainerLow,
     ) {
         Column(
             modifier = Modifier.fillMaxWidth().padding(padding),
@@ -405,9 +434,9 @@ internal fun OpenUiPopover(
 @Composable
 internal fun OpenUiDivider(modifier: Modifier = Modifier) {
     HorizontalDivider(
-        modifier = modifier.fillMaxWidth().padding(vertical = 6.dp),
-        thickness = 0.5.dp,
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f),
+        modifier = modifier.fillMaxWidth().padding(vertical = 4.dp),
+        thickness = 0.75.dp,
+        color = MaterialTheme.colorScheme.outlineVariant,
     )
 }
 
