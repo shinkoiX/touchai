@@ -66,9 +66,7 @@ class TouchAiApplication : Application() {
         ChatRequestRunner(chatHistory, chatClient, responseClient::cancelResponse, requestScope,
             onWorkStarted = { RequestService.start(this) },
             onIdle = { stopService(Intent(this, RequestService::class.java)) },
-            openUiPromptProvider = {
-                if (settingsRepository.load().intelligentUi) openUiSystemPrompt else null
-            })
+            openUiPromptProvider = { openUiSystemPrompt })
     }
 
     fun restorePendingRequests() { requestScope.launch { requests.restorePending() } }

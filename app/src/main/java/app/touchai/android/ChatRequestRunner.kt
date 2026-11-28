@@ -207,7 +207,7 @@ class ChatRequestRunner(
                 }
             } + turn.user
             execution.creationStarted = true
-            val openUiPrompt = openUiPromptProvider()
+            val openUiPrompt = if (turn.ai.openUi) openUiPromptProvider() else null
             val effectiveInstructions = if (openUiPrompt != null) {
                 OpenUiAssets.mergeInstructions(
                     userInstructions = turn.ai.instructions,

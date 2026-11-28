@@ -26,6 +26,7 @@ class DataStoreSettingsRepository(
     override suspend fun load(): AppSettings = withContext(Dispatchers.IO) {
         val prefs = store.data.first()
         val defaults = AppSettings()
+        val defaultOpenUi = prefs[IntelligentUi] ?: defaults.intelligentUi
         AppSettings(
             connectionId = prefs[DefaultConnection]?.takeIf(String::isNotBlank),
             connections = prefs[Connections]?.let { serialized ->
@@ -50,15 +51,16 @@ class DataStoreSettingsRepository(
                     PromptPreset(preset.getValue("id").jsonPrimitive.content,
                         preset.getValue("name").jsonPrimitive.content,
                         preset.getValue("prompt").jsonPrimitive.content,
-                        (preset["ai"] as? JsonObject)?.let(::decodeAi),
-                        (preset["secondaryAi"] as? JsonObject)?.let(::decodeAi),
-                        attachScreenshot = preset["attachScreenshot"]?.jsonPrimitive?.booleanOrNull)
+                        (preset["ai"] as? JsonObject)?.let { decodeAi(it, defaultOpenUi) },
+                        (preset["secondaryAi"] as? JsonObject)?.let { decodeAi(it, defaultOpenUi) },
+                        attachScreenshot = preset["attachScreenshot"]?.jsonPrimitive?.booleanOrNull,
+                        openUi = preset["openUi"]?.jsonPrimitive?.booleanOrNull)
                 }
             } ?: defaults.presets,
             lastPresetId = prefs[LastPreset]?.takeIf(String::isNotEmpty) ?: if (prefs.contains(LastPreset)) null else defaults.lastPresetId,
             imageQuality = prefs[Quality]?.let(ImageQuality::valueOf) ?: defaults.imageQuality,
             imageLimit = prefs[ImageLimit] ?: defaults.imageLimit,
-            intelligentUi = prefs[IntelligentUi] ?: defaults.intelligentUi,
+            intelligentUi = defaultOpenUi,
             quickAccess = readQuickAccess(prefs),
         ).withConnections()
     }
@@ -72,6 +74,7 @@ class DataStoreSettingsRepository(
                 put("name", preset.name)
                 put("prompt", preset.prompt)
                 put("attachScreenshot", preset.attachScreenshot)
+                preset.openUi?.let { put("openUi", it) }
                 preset.customAi?.let { put("ai", encodeAi(it)) }
                 preset.secondaryAi?.let { put("secondaryAi", encodeAi(it)) }
             }) }
@@ -184,10 +187,11 @@ class DataStoreSettingsRepository(
         put("webSearch", api.webSearch)
         put("backgroundResponses", api.backgroundResponses)
         put("instructions", configuration.instructions)
+        put("openUi", configuration.openUi)
     }
 
     /** Also reads older presets that carried their own endpoint and encrypted key; load migrates them. */
-    private fun decodeAi(value: JsonObject): AiConfiguration {
+    private fun decodeAi(value: JsonObject, defaultOpenUi: Boolean = true): AiConfiguration {
         val legacy = OpenAIModelConfig()
         return AiConfiguration(
             api = OpenAIModelConfig(
@@ -204,6 +208,7 @@ class DataStoreSettingsRepository(
             ),
             instructions = value.getValue("instructions").jsonPrimitive.content,
             connectionId = value["connectionId"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank),
+            openUi = value["openUi"]?.jsonPrimitive?.booleanOrNull ?: defaultOpenUi,
         )
     }
 

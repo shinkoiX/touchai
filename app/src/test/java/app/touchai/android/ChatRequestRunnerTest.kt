@@ -197,4 +197,34 @@ class ChatRequestRunnerTest {
         assertEquals(TurnStatus.Stopped, handle.state.value.turns.last().status)
         assertEquals("Stopped Gemini", handle.state.value.turns.last().answer)
     }
+
+    @Test fun openUiPromptFollowsEachTurnConfiguration() = runTest {
+        val sentInstructions = mutableListOf<String>()
+        val runner = ChatRequestRunner(
+            history = history,
+            client = object : ChatClient {
+                override fun stream(config: OpenAIModelConfig, request: OpenAIRequest) = flow {
+                    sentInstructions += request.instructions
+                    emit(OpenAIStreamEvent.TextDelta("OK"))
+                    emit(OpenAIStreamEvent.Completed(JsonObject(emptyMap())))
+                }
+            },
+            cancelResponse = { _, _ -> JsonObject(emptyMap()) },
+            scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate),
+            onWorkStarted = {},
+            onIdle = {},
+            openUiPromptProvider = { "OPENUI_SYSTEM_PROMPT" },
+        )
+        runner.start(SavedChat("on", 1, null, listOf(
+            ChatTurn(ChatMessage(MessageRole.User, "Hi"), AiConfiguration(api, instructions = "Be brief.", openUi = true)),
+        )))
+        runner.start(SavedChat("off", 2, null, listOf(
+            ChatTurn(ChatMessage(MessageRole.User, "Hi"), AiConfiguration(api, instructions = "Be brief.", openUi = false)),
+        )))
+        advanceUntilIdle()
+        assertEquals(2, sentInstructions.size)
+        assertTrue(sentInstructions[0].contains("OPENUI_SYSTEM_PROMPT"))
+        assertTrue(sentInstructions[0].contains("Be brief."))
+        assertEquals("Be brief.", sentInstructions[1])
+    }
 }

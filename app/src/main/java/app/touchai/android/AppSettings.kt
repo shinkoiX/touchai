@@ -15,6 +15,7 @@ data class AiConfiguration(
     val api: OpenAIModelConfig = OpenAIModelConfig(),
     val instructions: String = "",
     val connectionId: String? = null,
+    val openUi: Boolean = true,
 )
 
 /** A reusable endpoint and credential: an API key for an HTTPS base URL, or a signed-in ChatGPT account. */
@@ -58,6 +59,7 @@ data class PromptPreset(
     val customAi: AiConfiguration? = null,
     val secondaryAi: AiConfiguration? = null,
     val attachScreenshot: Boolean? = null,
+    val openUi: Boolean? = null,
 )
 
 enum class ImageQuality(val label: String, val maxEdge: Int?, val jpegQuality: Int) {
@@ -125,7 +127,7 @@ data class AppSettings(
     val quickAccess: QuickAccessSettings = QuickAccessSettings(),
 )
 
-val AppSettings.defaultAi: AiConfiguration get() = AiConfiguration(api, instructions, connectionId)
+val AppSettings.defaultAi: AiConfiguration get() = AiConfiguration(api, instructions, connectionId, openUi = intelligentUi)
 
 fun AppSettings.connection(id: String?): ApiConnection? = id?.let { connections.find { connection -> connection.id == it } }
 
@@ -136,8 +138,13 @@ fun AppSettings.resolve(ai: AiConfiguration): AiConfiguration {
     return ai.copy(api = ai.api.using(connection))
 }
 
-fun AppSettings.aiFor(presetId: String?): AiConfiguration =
-    resolve(presets.find { it.id == presetId }?.customAi ?: defaultAi)
+fun AppSettings.aiFor(presetId: String?): AiConfiguration {
+    val preset = presets.find { it.id == presetId }
+    if (preset?.customAi != null) return resolve(preset.customAi)
+    val base = resolve(defaultAi)
+    val presetOpenUi = preset?.openUi
+    return if (presetOpenUi != null) base.copy(openUi = presetOpenUi) else base
+}
 
 fun AppSettings.secondaryAiFor(presetId: String?): AiConfiguration? =
     presets.find { it.id == presetId }?.secondaryAi?.let(::resolve)

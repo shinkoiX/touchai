@@ -171,22 +171,10 @@ fun SettingsScreen(
                     AiConfigurationEditor(
                         draft.defaultAi,
                         draft.connections,
-                        { onDraftChange(draft.copy(api = it.api, instructions = it.instructions, connectionId = it.connectionId)) },
+                        { onDraftChange(draft.copy(api = it.api, instructions = it.instructions, connectionId = it.connectionId, intelligentUi = it.openUi)) },
                     )
                     TestButton(state.testingConnection) { onTest(draft.resolve(draft.defaultAi), "Default AI") }
                 }
-            }
-
-            AppDivider()
-
-            Column {
-                SectionHeader("Intelligent UI")
-                SwitchRow("Intelligent UI (OpenUI)", draft.intelligentUi, { onDraftChange(draft.copy(intelligentUi = it)) })
-                Text(
-                    "Render rich cards, side-by-side media rows, SVG diagrams, charts, and interactive tools natively using the official OpenUI prompt.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
 
             AppDivider()
@@ -282,9 +270,20 @@ fun SettingsScreen(
                                                 { it == preset.attachScreenshot },
                                                 { when (it) { null -> "Default"; true -> "Always"; false -> "Never" } },
                                             ) { change(preset.copy(attachScreenshot = it)) }
+                                            if (preset.customAi == null) {
+                                                Text("Rich UI", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                Choices(
+                                                    listOf(null, true, false),
+                                                    { it == preset.openUi },
+                                                    { when (it) { null -> "Default"; true -> "On"; false -> "Off" } },
+                                                ) { change(preset.copy(openUi = it)) }
+                                            }
                                         }
                                         SwitchRow("Custom AI", preset.customAi != null, { custom ->
-                                            change(preset.copy(customAi = if (custom) draft.defaultAi.copy(api = draft.api.copy(webSearch = true)) else null))
+                                            change(preset.copy(customAi = if (custom) draft.defaultAi.copy(
+                                                api = draft.api.copy(webSearch = true),
+                                                openUi = preset.openUi ?: draft.intelligentUi,
+                                            ) else null))
                                         })
                                         preset.customAi?.let { configuration ->
                                             AiConfigurationEditor(configuration, draft.connections, { change(preset.copy(customAi = it)) })
@@ -292,7 +291,7 @@ fun SettingsScreen(
                                         }
                                         AppDivider()
                                         SwitchRow("Dual send (2nd AI)", preset.secondaryAi != null, { dual ->
-                                            val seed = preset.customAi ?: draft.defaultAi
+                                            val seed = preset.customAi ?: draft.defaultAi.copy(openUi = preset.openUi ?: draft.intelligentUi)
                                             change(preset.copy(secondaryAi = if (dual) seed.copy(api = seed.api.copy(webSearch = true)) else null))
                                         })
                                         preset.secondaryAi?.let { secondary ->
@@ -752,6 +751,13 @@ private fun AiConfigurationEditor(value: AiConfiguration, connections: List<ApiC
         AppTextField(value.instructions, { onChange(value.copy(instructions = it)) }, label = "Instructions", minLines = 2, modifier = Modifier.fillMaxWidth())
     }
     SwitchRow("Web search", value.api.webSearch, { search -> api { it.copy(webSearch = search) } })
+    SwitchRow("Rich UI", value.openUi, { enabled -> onChange(value.copy(openUi = enabled)) })
+    Text(
+        "Cards, charts, and interactive widgets.",
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(bottom = 4.dp),
+    )
     if (connection?.supportsBackgroundResponses == true) SwitchRow(
         "Recover interrupted responses",
         value.api.backgroundResponses,

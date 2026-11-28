@@ -296,6 +296,11 @@ fun QuickAiSwitcherSheet(
                     }
                 }
             }
+
+            AppDivider()
+            SwitchRow("Rich UI", draft.openUi, { enabled ->
+                updateDraft(draft.copy(openUi = enabled))
+            })
         }
     }
 }

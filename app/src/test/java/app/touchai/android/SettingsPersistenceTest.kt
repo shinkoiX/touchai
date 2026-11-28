@@ -256,4 +256,37 @@ class SettingsPersistenceTest {
             assertTrue(prioritizeModels(emptyList(), recent, openAiKey, allowRecentFallback = false).isEmpty())
         } finally { secondScope.coroutineContext[Job]!!.cancelAndJoin() }
     }
+
+    @Test fun richUiSettingFollowsDefaultAndEachPresetIndependently() = runBlocking {
+        val file = temporaryFolder.newFolder().resolve("openui.preferences_pb")
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        try {
+            val repo = DataStoreSettingsRepository(PreferenceDataStoreFactory.create(scope = scope) { file }, cipher)
+            val conn = ApiConnection("c1", "API", apiKey = "test-secret")
+            val settings = AppSettings(
+                api = OpenAIModelConfig(model = "default-model"),
+                connectionId = "c1",
+                connections = listOf(conn),
+                intelligentUi = false,
+                presets = listOf(
+                    PromptPreset("inherit", "Inherit", "P1"),
+                    PromptPreset("force-on", "Force On", "P2", openUi = true),
+                    PromptPreset(
+                        "custom",
+                        "Custom",
+                        "P3",
+                        customAi = AiConfiguration(OpenAIModelConfig(model = "custom-model"), "", "c1", openUi = true),
+                        secondaryAi = AiConfiguration(OpenAIModelConfig(model = "second-model"), "", "c1", openUi = false),
+                    ),
+                ),
+            )
+            repo.save(settings)
+            val loaded = repo.load()
+            assertFalse(loaded.aiFor(null).openUi)
+            assertFalse(loaded.aiFor("inherit").openUi)
+            assertTrue(loaded.aiFor("force-on").openUi)
+            assertTrue(loaded.aiFor("custom").openUi)
+            assertFalse(loaded.secondaryAiFor("custom")!!.openUi)
+        } finally { scope.coroutineContext[Job]!!.cancelAndJoin() }
+    }
 }
