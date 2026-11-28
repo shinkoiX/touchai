@@ -24,6 +24,8 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import app.touchai.core.openai.ApiCost
+import app.touchai.core.openai.ApiUsage
 import app.touchai.core.openai.RequestLogRecord
 import java.io.IOException
 import java.text.DateFormat
@@ -131,11 +133,27 @@ fun RequestLogScreen(store: RequestLogStore, onClose: () -> Unit) {
                             }
                             Text(entry.data.getValue("model").jsonPrimitive.content, style = MaterialTheme.typography.bodyMedium)
                             val duration = entry.data["durationMillis"]?.jsonPrimitive?.content?.let { " · ${it} ms" }.orEmpty()
+                            val entryUsage = (entry.data["usage"] as? JsonObject)?.let(ApiUsage::fromJson)
+                            val entryCost = (entry.data["cost"] as? JsonObject)?.let(ApiCost::fromJson)
+                            val usageSummary = buildList {
+                                entryCost?.let { add(formatUsd(it.totalCostUsd)) }
+                                entryUsage?.takeIf { it.hasData }?.let { u ->
+                                    add("↑${formatTokenCount(u.inputTokens)} ↓${formatTokenCount(u.outputTokens)}")
+                                    u.cacheHitRate?.let { rate -> add("cache ${formatCacheHitPercent(rate)}") }
+                                }
+                            }.takeIf { it.isNotEmpty() }?.joinToString(" · ").orEmpty()
                             Text(
                                 "${entry.data.getValue("messageCount")} messages · ${entry.data.getValue("imageCount")} images$duration",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            if (usageSummary.isNotEmpty()) {
+                                Text(
+                                    usageSummary,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
                             if (expanded == entry.id) {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                                     TextButton(onClick = { exportId = entry.id; export.launch("touchai-request-${entry.id}.json") }) {

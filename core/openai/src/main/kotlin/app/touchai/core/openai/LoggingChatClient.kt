@@ -26,6 +26,7 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
             put("status", "Running")
             put("purpose", request.purpose.name)
             request.presetName?.let { put("preset", it) }
+            request.connectionId?.let { put("connectionId", it) }
             put("endpoint", buildRequestUrl(config))
             put("protocol", config.protocol.label)
             put("authentication", config.authentication.label)
@@ -136,6 +137,18 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
             failure = error
             throw error
         } finally {
+            val effectiveConfig = config.copy(
+                serviceTier = if (serviceTierWasAdjusted) adjustedServiceTier else config.serviceTier,
+            )
+            val parsedUsage = (responsePayload as? JsonObject)?.let { payload ->
+                extractApiUsage(
+                    protocol = effectiveConfig.requestProtocol,
+                    response = payload,
+                    fallbackModel = effectiveConfig.model,
+                    fallbackServiceTier = wireServiceTier(effectiveConfig.requestProtocol, effectiveConfig.serviceTier),
+                )
+            }
+            val estimatedCost = parsedUsage?.let { estimateApiCost(effectiveConfig, it, record.startedAt) }
             val result = buildJsonObject {
                 put("status", status)
                 responseId?.let { put("responseId", it) }
@@ -148,6 +161,8 @@ class LoggingChatClient(private val client: ChatClient, private val logs: Reques
                 put("outputCharacters", outputCharacters)
                 put("textChunks", textChunks)
                 put("outputImageCount", images.size)
+                parsedUsage?.let { put("usage", it.toJson()) }
+                estimatedCost?.let { put("cost", it.toJson()) }
                 putJsonObject("output") {
                     if (reasoningText.isNotEmpty()) put("reasoning", reasoningText.toString())
                     put("text", outputText.toString())

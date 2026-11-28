@@ -15,6 +15,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
@@ -199,11 +201,19 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
     var switcherOpen by remember { mutableStateOf(false) }
     var switcherInitialSlot by remember { mutableIntStateOf(0) }
     var retrySwitchTarget by remember { mutableStateOf<Pair<Int, AiConfiguration>?>(null) }
+    var billingDialogOpen by remember { mutableStateOf(false) }
     val density = LocalDensity.current
     var topOverlayHeightPx by remember { mutableIntStateOf(0) }
     var bottomOverlayHeightPx by remember { mutableIntStateOf(0) }
     val topOverlayDp = with(density) { topOverlayHeightPx.toDp() }
     val bottomOverlayDp = with(density) { bottomOverlayHeightPx.toDp() }
+    val billingSummary = remember(state.turns) { summarizeConversationBilling(state.turns) }
+    val isAtBottom by remember {
+        derivedStateOf {
+            scrollState.maxValue != Int.MAX_VALUE &&
+                (scrollState.maxValue == 0 || scrollState.value >= scrollState.maxValue - 48)
+        }
+    }
     val showScrollToBottom by remember {
         derivedStateOf {
             state.turns.isNotEmpty() &&
@@ -211,6 +221,11 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                 scrollState.value < scrollState.maxValue - 140
         }
     }
+    val showBillingBar = !compactKeyboard &&
+        state.turns.isNotEmpty() &&
+        billingSummary != null &&
+        isAtBottom &&
+        !showScrollToBottom
     val surfaceBg = MaterialTheme.colorScheme.background
     val floatingPillColor = if (MaterialTheme.colorScheme.surface.red < 0.5f) {
         MaterialTheme.colorScheme.surfaceContainerHigh
@@ -246,7 +261,7 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
                             start = 20.dp,
                             end = 20.dp,
                             top = topOverlayDp + 12.dp,
-                            bottom = bottomOverlayDp + 20.dp,
+                            bottom = bottomOverlayDp + if (billingSummary != null) 48.dp else 20.dp,
                         ),
                     verticalArrangement = Arrangement.spacedBy(26.dp),
                 ) {
@@ -503,6 +518,24 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
             }
         }
 
+        // Bottom-only floating API billing & cache hit rate bar directly above the chat composer.
+        AnimatedVisibility(
+            visible = showBillingBar,
+            enter = fadeIn() + slideInVertically { it / 2 },
+            exit = fadeOut() + slideOutVertically { it / 2 },
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .padding(bottom = bottomOverlayDp + 6.dp, start = 14.dp, end = 14.dp),
+        ) {
+            billingSummary?.let { summary ->
+                ConversationBillingBar(
+                    summary = summary,
+                    containerColor = floatingPillColor.copy(alpha = 0.94f),
+                    onClick = { billingDialogOpen = true },
+                )
+            }
+        }
+
         // Floating bottom composer with soft bottom fade gradient.
         Column(
             modifier = Modifier
@@ -674,6 +707,12 @@ fun OpenAIChatScreen(viewModel: OpenAIChatViewModel, runtime: QuickAccessRuntime
             liveUpdate = false,
             onApply = { updated -> viewModel.retry(updated, turnIndex = turnIndex) },
             onDismiss = { retrySwitchTarget = null },
+        )
+    }
+    if (billingDialogOpen && billingSummary != null) {
+        ConversationBillingDialog(
+            summary = billingSummary,
+            onDismiss = { billingDialogOpen = false },
         )
     }
 }
@@ -1484,5 +1523,171 @@ private fun Attachment(bitmap: Bitmap, maxHeight: Dp, preparing: Boolean, attach
             }
         }
         if (preparing) LinearProgressIndicator(Modifier.width(96.dp))
+    }
+}
+
+@Composable
+private fun ConversationBillingBar(
+    summary: ConversationBillingSummary,
+    containerColor: Color,
+    onClick: () -> Unit,
+) {
+    val costLabel = when {
+        summary.isOnlyChatGpt -> "ChatGPT"
+        summary.hasKnownCost -> buildString {
+            append(formatUsd(summary.totalCostUsd))
+            if (summary.unpricedApiTurnCount > 0) append("+")
+        }
+        else -> "—"
+    }
+    val detailParts = buildList {
+        add("↑${formatTokenCount(summary.totalInputTokens)} ↓${formatTokenCount(summary.totalOutputTokens)}")
+        summary.cacheHitRate?.let { rate ->
+            add("Cache ${formatCacheHitPercent(rate)}")
+        }
+        if (summary.totalSearchCalls > 0) {
+            add("Search ×${summary.totalSearchCalls}")
+        }
+    }
+    Surface(
+        onClick = onClick,
+        shape = CircleShape,
+        color = containerColor,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.55f)),
+        modifier = Modifier.semantics { contentDescription = "API usage and cost" },
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 5.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            Text(
+                text = costLabel,
+                style = MaterialTheme.typography.labelSmall,
+                fontWeight = FontWeight.SemiBold,
+                color = if (summary.hasKnownCost) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+            Text(
+                text = "·  ${detailParts.joinToString(" · ")}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ConversationBillingDialog(
+    summary: ConversationBillingSummary,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = RoundedCornerShape(24.dp),
+        title = { Text("API Usage & Cost", fontWeight = FontWeight.SemiBold) },
+        text = {
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                val totalLabel = when {
+                    summary.isOnlyChatGpt -> "ChatGPT plan (not billed per token)"
+                    summary.hasKnownCost -> buildString {
+                        append(formatUsd(summary.totalCostUsd))
+                        if (summary.unpricedApiTurnCount > 0) append(" (+${summary.unpricedApiTurnCount} unpriced)")
+                    }
+                    else -> "Official price unavailable"
+                }
+                BillingDetailRow("Conversation total (${summary.turnCount} turns)", totalLabel, emphasize = true)
+                if (summary.hasKnownCost) {
+                    BillingDetailRow("Token cost", formatUsd(summary.totalTokenCostUsd))
+                    if (summary.totalToolCostUsd > 0.0) {
+                        BillingDetailRow("Tool cost (search)", formatUsd(summary.totalToolCostUsd))
+                    }
+                }
+                AppDivider()
+                BillingDetailRow("Input tokens", formatTokenCount(summary.totalInputTokens))
+                BillingDetailRow("Uncached input", formatTokenCount(summary.totalUncachedInputTokens))
+                val cacheLabel = summary.cacheHitRate?.let { rate ->
+                    "${formatTokenCount(summary.totalCachedInputTokens)} (${formatCacheHitPercent(rate)})"
+                } ?: "0"
+                BillingDetailRow("Cached read", cacheLabel)
+                if (summary.totalCacheWriteTokens > 0L) {
+                    val writeParts = buildList {
+                        if (summary.totalCacheWrite30mTokens > 0L) add("30m: ${formatTokenCount(summary.totalCacheWrite30mTokens)}")
+                        if (summary.totalCacheWrite12hTokens > 0L) add("12h: ${formatTokenCount(summary.totalCacheWrite12hTokens)}")
+                        if (summary.totalCacheWriteOtherTokens > 0L) add("other: ${formatTokenCount(summary.totalCacheWriteOtherTokens)}")
+                    }
+                    val writeValue = if (writeParts.isNotEmpty()) {
+                        "${formatTokenCount(summary.totalCacheWriteTokens)} (${writeParts.joinToString(", ")})"
+                    } else formatTokenCount(summary.totalCacheWriteTokens)
+                    BillingDetailRow("Cache write", writeValue)
+                }
+                if (summary.totalToolUseInputTokens > 0L) {
+                    BillingDetailRow("Tool input tokens", formatTokenCount(summary.totalToolUseInputTokens))
+                }
+                val outputLabel = if (summary.totalReasoningTokens > 0L) {
+                    "${formatTokenCount(summary.totalOutputTokens)} (thinking ${formatTokenCount(summary.totalReasoningTokens)})"
+                } else formatTokenCount(summary.totalOutputTokens)
+                BillingDetailRow("Output tokens", outputLabel)
+                if (summary.totalSearchCalls > 0) {
+                    val searchDetail = buildList {
+                        if (summary.totalWebSearchCalls > 0) add("Web ×${summary.totalWebSearchCalls}")
+                        if (summary.totalGoogleSearchCalls > 0) add("Google ×${summary.totalGoogleSearchCalls}")
+                    }.joinToString(", ")
+                    BillingDetailRow("Search calls", searchDetail)
+                }
+                val lastUsage = summary.lastTurnUsage
+                if (lastUsage != null) {
+                    AppDivider()
+                    val lastCost = summary.lastTurnCost
+                    val lastTitle = if (summary.turnCount > 1) "Latest turn" else "Pricing details"
+                    val lastValue = when {
+                        summary.lastTurnIsChatGpt -> "ChatGPT plan"
+                        lastCost != null -> formatUsd(lastCost.totalCostUsd)
+                        else -> "Unpriced"
+                    }
+                    BillingDetailRow(lastTitle, lastValue, emphasize = true)
+                    val modelInfo = lastCost?.pricingModel ?: lastUsage.resolvedModel ?: "Unknown"
+                    val tierInfo = buildList {
+                        lastCost?.serviceTier?.let { add(it) } ?: lastUsage.effectiveServiceTier?.let { add(it) }
+                        if (lastCost?.longContext == true) add("long context")
+                    }.joinToString(" · ")
+                    BillingDetailRow("Model", if (tierInfo.isNotEmpty()) "$modelInfo ($tierInfo)" else modelInfo)
+                    if (summary.turnCount > 1) {
+                        lastUsage.cacheHitRate?.let { rate ->
+                            BillingDetailRow("Latest cache hit", "${formatCacheHitPercent(rate)} (${formatTokenCount(lastUsage.cachedInputTokens)} / ${formatTokenCount(lastUsage.inputTokens)})")
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
+private fun BillingDetailRow(label: String, value: String, emphasize: Boolean = false) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            text = label,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(end = 12.dp),
+        )
+        Text(
+            text = value,
+            style = MaterialTheme.typography.bodySmall,
+            fontWeight = if (emphasize) FontWeight.SemiBold else FontWeight.Medium,
+            color = if (emphasize) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+        )
     }
 }

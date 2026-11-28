@@ -43,6 +43,8 @@ data class ChatTurn(
     val responseId: String? = null,
     val cancelRequested: Boolean = false,
     val recoveryStatus: String? = null,
+    val usage: ApiUsage? = null,
+    val cost: ApiCost? = null,
 ) {
     val isRunning: Boolean get() = status in listOf(TurnStatus.Streaming, TurnStatus.Recovering, TurnStatus.Cancelling)
 }
@@ -748,7 +750,7 @@ class OpenAIChatViewModel(
             try {
                 var adjustedEffort: OpenAIStreamEvent.EffortAdjusted? = null
                 var adjustedTier: OpenAIStreamEvent.ServiceTierAdjusted? = null
-                client.stream(ai.api, OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Reply with OK only. This is a connection test.")), ai.instructions, RequestPurpose.ConnectionTest, label)).collect { event ->
+                client.stream(ai.api, OpenAIRequest(listOf(ChatMessage(MessageRole.User, "Reply with OK only. This is a connection test.")), ai.instructions, RequestPurpose.ConnectionTest, label, connectionId = ai.connectionId)).collect { event ->
                     when (event) {
                         is OpenAIStreamEvent.EffortAdjusted -> adjustedEffort = event
                         is OpenAIStreamEvent.ServiceTierAdjusted -> adjustedTier = event
@@ -960,6 +962,8 @@ class OpenAIChatViewModel(
                 imageGenerationStatus = null,
                 responseId = null,
                 cancelRequested = false,
+                usage = null,
+                cost = null,
             )
             lateinit var nextPane: ChatPaneState
             update { state ->

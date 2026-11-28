@@ -47,22 +47,26 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
         val originalTier = config.serviceTier?.trim()?.takeIf(String::isNotEmpty)
         var currentConfig = config.copy(reasoningEffort = originalEffort, serviceTier = originalTier)
         var includeSummary = true
+        var includeStreamUsage = true
         val triedEfforts = linkedSetOf<String?>(originalEffort?.lowercase())
         val triedTiers = linkedSetOf<String?>(wireServiceTier(currentConfig.requestProtocol, originalTier))
         var attempts = 0
         val maxAttempts = 8
         while (attempts < maxAttempts) {
             attempts++
-            val bodyWithSummary = buildRequestBody(currentConfig, request, includeReasoningSummary = includeSummary)
-            val bodyWithoutSummary = buildRequestBody(currentConfig, request, includeReasoningSummary = false)
+            val bodyWithSummary = buildRequestBody(currentConfig, request, includeReasoningSummary = includeSummary, includeStreamUsage = includeStreamUsage)
+            val bodyWithoutSummary = buildRequestBody(currentConfig, request, includeReasoningSummary = false, includeStreamUsage = includeStreamUsage)
             val allowSummaryFallback = includeSummary && bodyWithSummary != bodyWithoutSummary && attempts < maxAttempts
+            val allowStreamUsageFallback = includeStreamUsage && currentConfig.requestProtocol == ApiProtocol.ChatCompletions && attempts < maxAttempts
             var rejectedSummary = false
+            var rejectedStreamUsage = false
             var rejectedEffortBody: String? = null
             var rejectedTierBody: String? = null
             streamWithBody(
                 config = currentConfig,
                 requestBody = bodyWithSummary,
                 allowSummaryFallback = allowSummaryFallback,
+                allowStreamUsageFallback = allowStreamUsageFallback,
                 allowEffortFallback = currentConfig.reasoningEffort != null && attempts < maxAttempts,
                 allowServiceTierFallback = currentConfig.authentication != AuthenticationMethod.ChatGpt &&
                     wireServiceTier(currentConfig.requestProtocol, currentConfig.serviceTier) != null && attempts < maxAttempts,
@@ -76,10 +80,15 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                     }
                 },
                 onSummaryRejected = { rejectedSummary = true },
+                onStreamUsageRejected = { rejectedStreamUsage = true },
                 onEffortRejected = { rejectedEffortBody = it },
                 onServiceTierRejected = { rejectedTierBody = it },
                 onCheckpoint = onCheckpoint,
             )
+            if (rejectedStreamUsage) {
+                includeStreamUsage = false
+                continue
+            }
             if (rejectedSummary) {
                 includeSummary = false
                 continue
@@ -116,10 +125,12 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
         config: OpenAIModelConfig,
         requestBody: JsonObject,
         allowSummaryFallback: Boolean,
+        allowStreamUsageFallback: Boolean,
         allowEffortFallback: Boolean,
         allowServiceTierFallback: Boolean,
         onConnected: suspend () -> Unit,
         onSummaryRejected: () -> Unit,
+        onStreamUsageRejected: () -> Unit,
         onEffortRejected: (String) -> Unit,
         onServiceTierRejected: (String) -> Unit,
         onCheckpoint: (String) -> Unit,
@@ -135,6 +146,10 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
             if (!response.status.isSuccess()) {
                 val body = response.bodyAsText()
                 if (response.status == HttpStatusCode.BadRequest) {
+                    if (allowStreamUsageFallback && isStreamOptionsRejected(config, body)) {
+                        onStreamUsageRejected()
+                        return@execute
+                    }
                     if (allowServiceTierFallback && isServiceTierRejected(config, body)) {
                         onServiceTierRejected(body)
                         return@execute
@@ -162,6 +177,8 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
             val channel = response.bodyAsChannel()
             val bytes = ByteArray(8192)
             var completed = false
+            var pendingChatCompletion: JsonObject? = null
+            var chatUsagePayload: JsonObject? = null
             var streamAccepted = false
             var pendingCheckpoint: String? = null
             var thinkingEmitted = false
@@ -194,6 +211,10 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                     }
                     val decoded = decodeStreamPayload(config.requestProtocol, payload, event.name)
                     if (decoded.failure != null && !streamAccepted) {
+                        if (allowStreamUsageFallback && isStreamOptionsRejected(config, event.data)) {
+                            onStreamUsageRejected()
+                            return@execute
+                        }
                         if (allowServiceTierFallback && isServiceTierRejected(config, event.data)) {
                             onServiceTierRejected(event.data)
                             return@execute
@@ -208,6 +229,9 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                         }
                     }
                     emit(OpenAIStreamEvent.ResponsePayload(payload))
+                    if (config.requestProtocol == ApiProtocol.ChatCompletions && payload["usage"] is JsonObject) {
+                        chatUsagePayload = payload
+                    }
                     if (config.recoverResponses && responseId == null) {
                         checkpointId(config.requestProtocol, payload)?.let {
                             responseId = it
@@ -254,11 +278,29 @@ class OpenAIModel(private val httpClient: HttpClient) : ChatClient {
                     decoded.citations.forEach { emit(OpenAIStreamEvent.Citation(it)) }
                     decoded.failure?.let { throw it }
                     decoded.completed?.let {
-                        emit(OpenAIStreamEvent.Completed(it))
-                        completed = true
+                        if (config.requestProtocol == ApiProtocol.ChatCompletions) {
+                            // Keep reading until [DONE]/EOF so trailing stream_options usage chunk is captured.
+                            pendingChatCompletion = it
+                        } else {
+                            emit(OpenAIStreamEvent.Completed(it))
+                            completed = true
+                        }
                     }
                     if (completed) break@streamLoop
                 }
+            }
+            if (!completed && pendingChatCompletion != null) {
+                val base = pendingChatCompletion
+                val merged = chatUsagePayload?.let { usageChunk ->
+                    JsonObject(buildMap {
+                        putAll(base)
+                        usageChunk["usage"]?.let { put("usage", it) }
+                        if (!base.containsKey("model")) usageChunk["model"]?.let { put("model", it) }
+                        if (!base.containsKey("service_tier")) usageChunk["service_tier"]?.let { put("service_tier", it) }
+                    })
+                } ?: base
+                emit(OpenAIStreamEvent.Completed(merged))
+                completed = true
             }
             if (!completed) {
                 throw ResponseInterruptedException("The connection ended before completion was confirmed.")
@@ -456,6 +498,12 @@ internal fun isReasoningSummaryRejected(config: OpenAIModelConfig, body: String)
         return true
     }
     return config.requestProtocol == ApiProtocol.Responses && config.reasoningEffort == null && "reasoning" in lower
+}
+
+internal fun isStreamOptionsRejected(config: OpenAIModelConfig, body: String): Boolean {
+    if (config.requestProtocol != ApiProtocol.ChatCompletions) return false
+    val lower = body.lowercase()
+    return "stream_options" in lower || "include_usage" in lower
 }
 
 private fun decodeGeminiEvent(payload: JsonObject, name: String?): DecodedEvent =

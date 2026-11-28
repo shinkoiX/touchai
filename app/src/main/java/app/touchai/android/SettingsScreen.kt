@@ -26,6 +26,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.touchai.core.openai.ApiProtocol
 import app.touchai.core.openai.AuthenticationMethod
 import app.touchai.core.openai.GeminiBaseUrl
@@ -50,6 +51,20 @@ fun SettingsScreen(
     onClose: () -> Unit,
 ) {
     val draft = state.settingsDraft!!
+    val context = LocalContext.current
+    val requestLogs = remember(context) { (context.applicationContext as? TouchAiApplication)?.requestLogs }
+    val logRevision by (requestLogs?.revision ?: remember { kotlinx.coroutines.flow.MutableStateFlow(0L) }).collectAsStateWithLifecycle()
+    var connectionSpend by remember { mutableStateOf<Map<String, ConnectionSpendSummary>>(emptyMap()) }
+    LaunchedEffect(draft.connections, logRevision, requestLogs) {
+        if (requestLogs == null || draft.connections.isEmpty()) {
+            connectionSpend = emptyMap()
+            return@LaunchedEffect
+        }
+        val since = System.currentTimeMillis() - THIRTY_DAYS_MILLIS
+        connectionSpend = runCatching {
+            summarizeConnectionSpend(draft.connections, requestLogs.readSince(since), since)
+        }.getOrDefault(emptyMap())
+    }
     var expandedPreset by rememberSaveable { mutableStateOf(state.selectedPreset) }
     var expandedConnection by rememberSaveable { mutableStateOf<String?>(null) }
     // Settings from the repository are already migrated; this covers drafts built elsewhere.
@@ -120,6 +135,7 @@ fun SettingsScreen(
                                     connection,
                                     expanded = expandedConnection == connection.id,
                                     usedBy = usedBy,
+                                    spend = connectionSpend[connection.id],
                                     onExpand = { expandedConnection = if (expandedConnection == connection.id) null else connection.id },
                                     onChange = { value ->
                                         onDraftChange(draft.copy(connections = draft.connections.map { if (it.id == connection.id) value else it }))
@@ -494,11 +510,13 @@ private fun ConnectionEditor(
     value: ApiConnection,
     expanded: Boolean,
     usedBy: List<String>,
+    spend: ConnectionSpendSummary?,
     onExpand: () -> Unit,
     onChange: (ApiConnection) -> Unit,
     onRemove: () -> Unit,
 ) {
     val rotation by animateFloatAsState(if (expanded) 180f else 0f, label = "chevron")
+    val isChatGpt = value.authentication == AuthenticationMethod.ChatGpt
     Column(Modifier.fillMaxWidth()) {
         Row(
             Modifier
@@ -507,6 +525,7 @@ private fun ConnectionEditor(
                 .heightIn(min = 56.dp)
                 .padding(vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(value.name.ifBlank { "New connection" }, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Medium)
@@ -518,10 +537,40 @@ private fun ConnectionEditor(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            if (spend != null) {
+                val badgeText = when {
+                    isChatGpt && spend.requestCount > 0 -> "30d · ${spend.requestCount} req"
+                    isChatGpt -> null
+                    spend.pricedRequestCount > 0 -> buildString {
+                        append("30d ")
+                        append(formatUsd(spend.totalCostUsd))
+                        if (spend.unpricedApiRequestCount > 0) append("+")
+                    }
+                    else -> "30d $0"
+                }
+                if (badgeText != null) {
+                    val hasSpend = !isChatGpt && spend.totalCostUsd > 0.0
+                    Surface(
+                        shape = CircleShape,
+                        color = if (hasSpend) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh,
+                    ) {
+                        Text(
+                            text = badgeText,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.SemiBold,
+                            color = if (hasSpend) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        )
+                    }
+                }
+            }
             AppIcon(R.drawable.ic_expand, if (expanded) "Collapse" else "Expand", Modifier.rotate(rotation), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (expanded) {
             Column(Modifier.padding(vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (spend != null) {
+                    ConnectionSpendCard(spend, isChatGpt)
+                }
                 AppTextField(value.name, { onChange(value.copy(name = it)) }, label = "Connection name", singleLine = true, modifier = Modifier.fillMaxWidth())
                 Choices(AuthenticationMethod.entries, { it == value.authentication }, { it.label }) { method ->
                     if (method != value.authentication) onChange(ApiConnection(value.id, value.name, method))
@@ -557,6 +606,72 @@ private fun ConnectionEditor(
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
                 AppIconButton(R.drawable.ic_delete, "Remove connection", onRemove, enabled = usedBy.isEmpty())
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConnectionSpendCard(spend: ConnectionSpendSummary, isChatGpt: Boolean) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = if (isChatGpt) "Last 30 days (ChatGPT plan)" else "Last 30 days spend",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                val primaryValue = when {
+                    isChatGpt -> "${spend.requestCount} ${if (spend.requestCount == 1) "request" else "requests"}"
+                    spend.pricedRequestCount > 0 -> buildString {
+                        append(formatUsd(spend.totalCostUsd))
+                        if (spend.unpricedApiRequestCount > 0) append(" (+${spend.unpricedApiRequestCount} unpriced)")
+                    }
+                    else -> "$0"
+                }
+                Text(
+                    text = primaryValue,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.SemiBold,
+                    color = if (!isChatGpt && spend.totalCostUsd > 0.0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            if (spend.requestCount > 0) {
+                val stats = buildList {
+                    if (!isChatGpt) add("${spend.requestCount} ${if (spend.requestCount == 1) "request" else "requests"}")
+                    add("↑${formatTokenCount(spend.totalInputTokens)} ↓${formatTokenCount(spend.totalOutputTokens)}")
+                    spend.cacheHitRate?.let { add("Cache ${formatCacheHitPercent(it)}") }
+                    if (spend.totalSearchCalls > 0) add("Search ×${spend.totalSearchCalls}")
+                }.joinToString(" · ")
+                Text(
+                    text = stats,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (!isChatGpt && spend.totalToolCostUsd > 0.0) {
+                    Text(
+                        text = "Tokens ${formatUsd(spend.totalTokenCostUsd)} · Tools ${formatUsd(spend.totalToolCostUsd)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                Text(
+                    text = "No logged usage in the last 30 days",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

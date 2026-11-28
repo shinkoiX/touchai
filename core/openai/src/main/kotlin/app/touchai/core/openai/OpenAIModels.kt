@@ -51,6 +51,7 @@ data class OpenAIRequest(
     val purpose: RequestPurpose = RequestPurpose.Chat,
     val presetName: String? = null,
     val resumeResponseId: String? = null,
+    val connectionId: String? = null,
 )
 
 sealed interface OpenAIStreamEvent {
@@ -115,11 +116,17 @@ internal fun io.ktor.client.request.HttpRequestBuilder.authorize(config: OpenAIM
 /** Google lists models as `models/{id}`, but the Interactions API takes the bare id. */
 fun geminiModelId(model: String): String = model.removePrefix("models/")
 
-fun buildRequestBody(config: OpenAIModelConfig, request: OpenAIRequest, includeReasoningSummary: Boolean = true): JsonObject = buildJsonObject {
+fun buildRequestBody(
+    config: OpenAIModelConfig,
+    request: OpenAIRequest,
+    includeReasoningSummary: Boolean = true,
+    includeStreamUsage: Boolean = true,
+): JsonObject = buildJsonObject {
     put("model", if (config.requestProtocol == ApiProtocol.Gemini) geminiModelId(config.model) else config.model)
     put("stream", true)
     when (config.requestProtocol) {
         ApiProtocol.ChatCompletions -> {
+            if (includeStreamUsage) putJsonObject("stream_options") { put("include_usage", true) }
             putJsonArray("messages") {
                 if (request.instructions.isNotBlank()) add(buildJsonObject {
                     put("role", "system")

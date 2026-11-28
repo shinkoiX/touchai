@@ -105,6 +105,30 @@ class RequestLogStore(context: Context, name: String = "request_logs.db") : Requ
         }
     }
 
+    suspend fun readSince(sinceMillis: Long): List<RequestLogRecord> = withContext(Dispatchers.IO) {
+        mutex.withLock {
+            helper.readableDatabase.query(
+                "requests",
+                arrayOf("id", "started_at", "record"),
+                "started_at >= ?",
+                arrayOf(sinceMillis.toString()),
+                null,
+                null,
+                "sequence DESC",
+            ).use { cursor ->
+                buildList {
+                    while (cursor.moveToNext()) add(
+                        RequestLogRecord(
+                            cursor.getString(0),
+                            cursor.getLong(1),
+                            Json.parseToJsonElement(cursor.getString(2)).jsonObject,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
     suspend fun clear() = withContext(Dispatchers.IO) {
         mutex.withLock {
             helper.writableDatabase.delete("requests", null, null)

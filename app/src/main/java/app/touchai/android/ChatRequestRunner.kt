@@ -190,6 +190,7 @@ class ChatRequestRunner(
         var status = TurnStatus.Completed
         var errorMessage: String? = null
         var lastSave = System.nanoTime()
+        val requestStartedAt = System.currentTimeMillis()
         try {
             if (turnFor(handle.state.value, nodeId)?.cancelRequested == true && !execution.creationStarted && turn.responseId == null)
                 throw UserRequestedCancellation()
@@ -218,7 +219,8 @@ class ChatRequestRunner(
                 turn.ai.instructions
             }
             client.stream(turn.ai.api, OpenAIRequest(messages, effectiveInstructions, purpose, turn.presetName,
-                resumeResponseId = if (purpose == RequestPurpose.Resume) turn.responseId else null)).collect { event ->
+                resumeResponseId = if (purpose == RequestPurpose.Resume) turn.responseId else null,
+                connectionId = turn.ai.connectionId)).collect { event ->
                 when (event) {
                     is OpenAIStreamEvent.ThinkingStarted -> update(handle, nodeId) {
                         if (it.answer.isEmpty() && it.generatedImages.isEmpty()) it.copy(isThinking = true) else it
@@ -241,7 +243,10 @@ class ChatRequestRunner(
                         reasoningBuffer.flush(); buffer.clear()
                         update(handle, nodeId) { it.copy(answer = event.text, isThinking = false) }
                     }
-                    is OpenAIStreamEvent.Completed -> { reasoningBuffer.flush(); buffer.flush() }
+                    is OpenAIStreamEvent.Completed -> {
+                        reasoningBuffer.flush(); buffer.flush()
+                        recordUsage(handle, nodeId, event.response, requestStartedAt)
+                    }
                     is OpenAIStreamEvent.SearchStatus -> update(handle, nodeId) { it.copy(searchStatus = event.status) }
                     is OpenAIStreamEvent.Citation -> update(handle, nodeId) { it.copy(citations = (it.citations + event.source).distinct()) }
                     is OpenAIStreamEvent.ImageGenerated -> {
@@ -372,14 +377,38 @@ class ChatRequestRunner(
         if (nodeId != null && chat.tree != null) chat.tree.node(nodeId)?.turn else chat.turns.lastOrNull()
 
     private fun applyResponse(handle: ActiveChatRequest, nodeId: String?, response: JsonObject) {
-        val protocol = turnFor(handle.state.value, nodeId)?.ai?.api?.requestProtocol ?: return
+        val api = turnFor(handle.state.value, nodeId)?.ai?.api ?: return
+        val protocol = api.requestProtocol
         val output = readResponseOutput(protocol, response)
+        val parsedUsage = extractApiUsage(
+            protocol = protocol,
+            response = response,
+            fallbackModel = api.model,
+            fallbackServiceTier = wireServiceTier(protocol, api.serviceTier),
+        )
+        val estimatedCost = parsedUsage?.let { estimateApiCost(api, it) }
         update(handle, nodeId) { it.copy(
             answer = if (output.text.isNotEmpty() || response["status"]?.jsonPrimitive?.content == "completed") output.text else it.answer,
             reasoning = if (output.reasoning.isNotEmpty()) output.reasoning else it.reasoning,
             isThinking = false,
             generatedImages = (it.generatedImages + output.images).distinctBy { image -> image.id },
-            citations = (it.citations + output.citations).distinct()) }
+            citations = (it.citations + output.citations).distinct(),
+            usage = parsedUsage ?: it.usage,
+            cost = estimatedCost ?: it.cost,
+        ) }
+    }
+
+    private fun recordUsage(handle: ActiveChatRequest, nodeId: String?, response: JsonObject, timestampMillis: Long) {
+        val api = turnFor(handle.state.value, nodeId)?.ai?.api ?: return
+        val protocol = api.requestProtocol
+        val parsedUsage = extractApiUsage(
+            protocol = protocol,
+            response = response,
+            fallbackModel = api.model,
+            fallbackServiceTier = wireServiceTier(protocol, api.serviceTier),
+        ) ?: return
+        val estimatedCost = estimateApiCost(api, parsedUsage, timestampMillis)
+        update(handle, nodeId) { it.copy(usage = parsedUsage, cost = estimatedCost) }
     }
 
     private fun update(handle: ActiveChatRequest, nodeId: String?, transform: (ChatTurn) -> ChatTurn) {

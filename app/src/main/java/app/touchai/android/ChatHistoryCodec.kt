@@ -21,6 +21,8 @@ internal fun encodeChatTurn(turn: ChatTurn, encryptedApiKey: String? = null) = b
     putJsonArray("citations") { turn.citations.forEach { citation -> add(buildJsonObject {
         put("url", citation.url); put("title", citation.title); put("startIndex", citation.startIndex); put("endIndex", citation.endIndex)
     }) } }
+    turn.usage?.let { put("usage", it.toJson()) }
+    turn.cost?.let { put("cost", it.toJson()) }
     putJsonObject("ai") {
         val api = turn.ai.api
         encryptedApiKey?.let { put("encryptedApiKey", it) }; put("model", api.model); put("baseUrl", api.baseUrl)
@@ -62,6 +64,8 @@ internal fun decodeChatTurn(value: JsonObject, apiKey: String): ChatTurn {
             WebCitation(it.string("url"), it.string("title"), it.getValue("startIndex").jsonPrimitive.intOrNull,
                 it.getValue("endIndex").jsonPrimitive.intOrNull)
         } },
+        usage = (value["usage"] as? JsonObject)?.let(ApiUsage::fromJson),
+        cost = (value["cost"] as? JsonObject)?.let(ApiCost::fromJson),
     )
 }
 
